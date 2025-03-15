@@ -17,19 +17,25 @@
 #include <fstream>
 #include <functional>
 
-#define LOG_INF(...) do { fprintf(stdout, __VA_ARGS__); } while (0)
-#define LOG_WRN(...) do { fprintf(stderr, __VA_ARGS__); } while (0)
-#define LOG_ERR(...) do { fprintf(stderr, __VA_ARGS__); } while (0)
-#define LOG_DBG(...) do { fprintf(stdout, __VA_ARGS__); } while (0)
-
 namespace ggml_easy {
 
 struct ctx_params {
     bool use_gpu = true;
     int max_nodes = 8192;
+    ggml_log_level log_level = GGML_LOG_LEVEL_INFO;
 };
 
+void log_cb(ggml_log_level level, const char * text, void * cur_lvl_ptr) {
+    ggml_log_level cur_lvl = *(ggml_log_level *) cur_lvl_ptr;
+    if (cur_lvl > level) {
+        return;
+    }
+    fputs(text, stderr);
+    fflush(stderr);
+}
+
 struct ctx {
+    ggml_log_level log_level;
     gguf_context * ctx_gguf = nullptr;
     ggml_context * ctx_data = nullptr;
     ggml_context * ctx_gf   = nullptr;
@@ -51,19 +57,20 @@ struct ctx {
      * Construct a new ctx object
      * If use_gpu is true, the GPU backend will be used, otherwise the CPU backend will be used
      */
-    ctx(const ctx_params & params) {
+    ctx(const ctx_params & params) : log_level(params.log_level) {
+        ggml_log_set(log_cb, &log_level);
         backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
         backend     = params.use_gpu
                         ? ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr)
                         : nullptr;
     
         if (backend) {
-            LOG_INF("%s: CLIP using %s backend\n", __func__, ggml_backend_name(backend));
+            log(GGML_LOG_LEVEL_INFO, "%s: using %s backend\n", __func__, ggml_backend_name(backend));
             backend_ptrs.push_back(backend);
             backend_buft.push_back(ggml_backend_get_default_buffer_type(backend));
         } else {
             backend = backend_cpu;
-            LOG_INF("%s: CLIP using CPU backend\n", __func__);
+            log(GGML_LOG_LEVEL_INFO, "%s: using CPU backend\n", __func__);
         }
     
         backend_ptrs.push_back(backend_cpu);
@@ -141,7 +148,7 @@ struct ctx {
                 ggml_backend_tensor_set(cur, read_buf.data(), 0, num_bytes);
             }
         }
-        LOG_INF("%s: Loaded %d tensors\n", __func__, n_tensors);
+        log(GGML_LOG_LEVEL_INFO, "%s: Loaded %d tensors\n", __func__, n_tensors);
         fin.close();
 
         ggml_free(meta);
@@ -250,6 +257,31 @@ struct ctx {
             ggml_backend_free(backend_cpu);
         }
     }
+
+private:
+    void log(ggml_log_level level, const char * format, ...) {
+        va_list args;
+        va_start(args, format);
+        log_impl(level, format, args);
+        va_end(args);
+    }
+
+    void log_impl(ggml_log_level level, const char * format, va_list args) {
+        va_list args_copy;
+        va_copy(args_copy, args);
+        char buffer[128];
+        int len = vsnprintf(buffer, 128, format, args);
+        if (len < 128) {
+            log_cb(level, buffer, &log_level);
+        } else {
+            char * buffer2 = new char[len + 1];
+            vsnprintf(buffer2, len + 1, format, args_copy);
+            buffer2[len] = 0;
+            log_cb(level, buffer2, &log_level);
+            delete[] buffer2;
+        }
+        va_end(args_copy);
+    }
 };
 
 namespace debug {
@@ -259,7 +291,7 @@ namespace debug {
             ggml_backend_buffer_type_t buft = gctx.backend_buft[i];
             size_t size = ggml_backend_sched_get_buffer_size(gctx.sched.get(), backend);
             if (size > 1) {
-                LOG_INF("%s: %10s compute buffer size = %8.2f MiB\n", __func__,
+                printf("%s: %10s compute buffer size = %8.2f MiB\n", __func__,
                         ggml_backend_buft_name(buft),
                         size / 1024.0 / 1024.0);
             }
@@ -271,22 +303,22 @@ namespace debug {
         int64_t * ne = t->ne;
         size_t * nb = t->nb;
         for (int64_t i3 = 0; i3 < ne[3]; i3++) {
-            LOG_DBG("                                     [\n");
+            printf("                                     [\n");
             for (int64_t i2 = 0; i2 < ne[2]; i2++) {
                 if (i2 == n && ne[2] > 2*n) {
-                    LOG_DBG("                                      ..., \n");
+                    printf("                                      ..., \n");
                     i2 = ne[2] - n;
                 }
-                LOG_DBG("                                      [\n");
+                printf("                                      [\n");
                 for (int64_t i1 = 0; i1 < ne[1]; i1++) {
                     if (i1 == n && ne[1] > 2*n) {
-                        LOG_DBG("                                       ..., \n");
+                        printf("                                       ..., \n");
                         i1 = ne[1] - n;
                     }
-                    LOG_DBG("                                       [");
+                    printf("                                       [");
                     for (int64_t i0 = 0; i0 < ne[0]; i0++) {
                         if (i0 == n && ne[0] > 2*n) {
-                            LOG_DBG("..., ");
+                            printf("..., ");
                             i0 = ne[0] - n;
                         }
                         size_t i = i3 * nb[3] + i2 * nb[2] + i1 * nb[1] + i0 * nb[0];
@@ -304,15 +336,15 @@ namespace debug {
                         } else {
                             GGML_ABORT("fatal error");
                         }
-                        LOG_DBG("%12.4f", v);
-                        if (i0 < ne[0] - 1) LOG_DBG(", ");
+                        printf("%12.4f", v);
+                        if (i0 < ne[0] - 1) printf(", ");
                     }
-                    LOG_DBG("],\n");
+                    printf("],\n");
                 }
-                LOG_DBG("                                      ],\n");
+                printf("                                      ],\n");
             }
-            LOG_DBG("                                     ]\n");
-            //LOG_DBG("                                     sum = %f\n", sum);
+            printf("                                     ]\n");
+            //printf("                                     sum = %f\n", sum);
         }
     }
 } // namespace debug

@@ -1,5 +1,5 @@
 #include "ggml.h"
-#include "ggml-easy.hpp"
+#include "ggml-easy.h"
 #include <iostream>
 
 int main() {
