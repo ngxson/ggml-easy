@@ -11,7 +11,7 @@ A simple C++ wrapper around [GGML](https://github.com/ggml-org/ggml) to make mod
 As a header-only library, using ggml-easy is straightforward:
 
 1. Include the headers in your project
-2. Make sure you have GGML as a dependency
+2. Make sure you have GGML as a dependency in `CMakeLists.txt`
 3. Use the `ggml_easy` namespace in your code
 
 Example:
@@ -21,4 +21,4 @@ Example:
 // Your code here
 ```
 
-See [./demo.cpp](demo.cpp) for a complete example of how to use `ggml-easy` in a project.
+See [demo.cpp](demo.cpp) for a complete example of how to use `ggml-easy` in a project.
