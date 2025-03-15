@@ -10,3 +10,8 @@ set(TARGET demo)
 add_executable(${TARGET} demo.cpp)
 target_link_libraries(${TARGET} PRIVATE ggml)
 target_compile_features(${TARGET} PRIVATE cxx_std_11)
+
+set(TARGET demo-dyt-rms)
+add_executable(${TARGET} demo-dyt-rms.cpp)
+target_link_libraries(${TARGET} PRIVATE ggml)
+target_compile_features(${TARGET} PRIVATE cxx_std_11)
