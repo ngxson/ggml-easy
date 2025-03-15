@@ -1,3 +1,4 @@
+#include "ggml.h"
 #include "ggml-easy.hpp"
 #include <iostream>
 
