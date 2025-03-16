@@ -21,4 +21,14 @@ Example:
 // Your code here
 ```
 
-See [demo.cpp](demo.cpp) for a complete example of how to use `ggml-easy` in a project.
+See [demo/basic.cpp](demo/basic.cpp) for a complete example of how to use `ggml-easy` in a project.
+
+## Compile examples
+
+To compile everything inside `demo/*`
+
+```sh
+cmake -B build
+cmake --build build -j
+# output: build/bin/*
+```
