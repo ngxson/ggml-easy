@@ -4,20 +4,37 @@
 #include <ctime>
 #include <random>
 
-const time_t seed      = 1; // std::time(0);
-const int n_iters      = 2;
-const int n_components = 4;
-const int rows_A = 3, cols_A = 2;
+const time_t seed = std::time(0);
+
+const int   rank   = 4;
+const float delta  = 0.001;
+const float eps    = 0.97;
+const float lambda = 2;
+
+const int rows_A = 3;
+const int cols_A = 2;
 float matrix_A[rows_A * cols_A] = {
     1, 2,
     3, 4,
     5, 6,
 };
 
+/**
+ * This program computes the singular value decomposition (SVD) of a matrix A using the power iteration method.
+ * The matrix A is decomposed into the product of three matrices U, S, and V such that A = U * S * V^T.
+ *
+ * After decomposed the matrix A, the program reconstructs the matrix A using the decomposed matrices U, S, and V.
+ * The reconstructed matrix should be the same as the original matrix A.
+ * 
+ * Ref python implementation: https://gist.github.com/Zhenye-Na/cbf4e534b44ef94fdbad663ef56dd333
+ */
+
 int main() {
     ggml_easy::ctx_params params;
-    params.use_gpu = false;
     ggml_easy::ctx ctx(params);
+
+    const int n_iters = log(4.0f * log(2.0f * rows_A / delta) / (eps * delta)) / (2 * lambda);
+    printf("n_iters = %d\n", n_iters);
 
     auto norm = [&](ggml_context * ctx_gf, ggml_tensor * t) {
         return ggml_sqrt(ctx_gf, ggml_sum_rows(ctx_gf, ggml_sqr(ctx_gf, t)));
@@ -48,11 +65,11 @@ int main() {
         // normalize x
         x = ggml_div(ctx_gf, x, norm(ctx_gf, x));
 
-        ggml_tensor * out_u; // final shape: [cols_A, n_components]
-        ggml_tensor * out_s; // final shape: [n_components]
-        ggml_tensor * out_v; // final shape: [rows_A, n_components]
+        ggml_tensor * out_u; // final shape: [cols_A, rank]
+        ggml_tensor * out_s; // final shape: [rank]
+        ggml_tensor * out_v; // final shape: [rows_A, rank]
         
-        for (int i = 0; i < n_components; i++) {
+        for (int i = 0; i < rank; i++) {
             std::vector<ggml_tensor *> result = power_iteration(ctx_gf, gf, A, x);
             ggml_tensor * u = result[0];
             ggml_tensor * s = result[1];
@@ -61,7 +78,6 @@ int main() {
             ggml_tensor * vT = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, v));
             ggml_tensor * uT = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, u));
             ggml_tensor * A_minus = ggml_mul(ctx_gf, ggml_mul_mat(ctx_gf, uT, vT), s);
-            ggml_format_name(A_minus, "A_minus_%d", i); ggml_build_forward_expand(gf, A_minus);
             A = ggml_add(ctx_gf, A, ggml_scale(ctx_gf, A_minus, -1));
 
             if (i == 0) {
@@ -116,10 +132,6 @@ int main() {
         return result_data;
     };
 
-    print_result(ctx, "A_minus_0");
-    print_result(ctx, "A_minus_1");
-    print_result(ctx, "A_minus_2");
-
     std::vector<uint8_t> data_u = print_result(ctx, "u");
     std::vector<uint8_t> data_s = print_result(ctx, "s");
     std::vector<uint8_t> data_v = print_result(ctx, "v");
@@ -129,9 +141,9 @@ int main() {
 
 
     gf = ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf) {
-        ggml_tensor * u = ggml_new_tensor_2d(ctx_gf, GGML_TYPE_F32, cols_A, n_components);
-        ggml_tensor * s = ggml_new_tensor_1d(ctx_gf, GGML_TYPE_F32, n_components);
-        ggml_tensor * v = ggml_new_tensor_2d(ctx_gf, GGML_TYPE_F32, rows_A, n_components);
+        ggml_tensor * u = ggml_new_tensor_2d(ctx_gf, GGML_TYPE_F32, cols_A, rank);
+        ggml_tensor * s = ggml_new_tensor_1d(ctx_gf, GGML_TYPE_F32, rank);
+        ggml_tensor * v = ggml_new_tensor_2d(ctx_gf, GGML_TYPE_F32, rows_A, rank);
 
         ggml_set_name(u, "u");
         ggml_set_name(s, "s");
@@ -146,7 +158,7 @@ int main() {
         ggml_tensor * uT = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, u));
         ggml_tensor * vT = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, v));
         ggml_tensor * temp = ggml_mul_mat(ctx_gf, s, uT);
-        ggml_tensor * result = ggml_mul_mat(ctx_gf, vT, temp);
+        ggml_tensor * result = ggml_mul_mat(ctx_gf, temp, vT);
 
         ggml_set_name(result, "result");
         ggml_build_forward_expand(gf, result);
