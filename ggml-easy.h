@@ -43,6 +43,7 @@ struct ctx {
     std::vector<ggml_tensor *> tensors;
 
     std::vector<uint8_t> buf_compute_meta;
+    int max_nodes;
 
     std::vector<ggml_backend_t> backend_ptrs;
     std::vector<ggml_backend_buffer_type_t> backend_buft;
@@ -57,7 +58,7 @@ struct ctx {
      * Construct a new ctx object
      * If use_gpu is true, the GPU backend will be used, otherwise the CPU backend will be used
      */
-    ctx(const ctx_params & params) : log_level(params.log_level) {
+    ctx(const ctx_params & params) : log_level(params.log_level), max_nodes(params.max_nodes) {
         ggml_log_set(log_cb, &log_level);
         backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
         backend     = params.use_gpu
@@ -77,10 +78,10 @@ struct ctx {
         backend_buft.push_back(ggml_backend_get_default_buffer_type(backend_cpu));
     
         sched.reset(
-            ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), params.max_nodes, false)
+            ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, false)
         );
 
-        buf_compute_meta.resize(GGML_DEFAULT_GRAPH_SIZE * ggml_tensor_overhead() + ggml_graph_overhead());
+        buf_compute_meta.resize(max_nodes * ggml_tensor_overhead() + ggml_graph_overhead());
     }
 
     /**
@@ -166,9 +167,9 @@ struct ctx {
         };
 
         ctx_gf = ggml_init(params);
-        struct ggml_cgraph * gf = ggml_new_graph(ctx_gf);
-
         ggml_backend_sched_reset(sched.get());
+        struct ggml_cgraph * gf = ggml_new_graph_custom(ctx_gf, max_nodes, false);
+
         builder_fn(ctx_gf, gf);
         ggml_backend_sched_alloc_graph(sched.get(), gf);
 
@@ -285,7 +286,7 @@ private:
 };
 
 namespace debug {
-    void print_backend_buffer_info(ctx & gctx) {
+    static void print_backend_buffer_info(ctx & gctx) {
         for (size_t i = 0; i < gctx.backend_ptrs.size(); ++i) {
             ggml_backend_t backend = gctx.backend_ptrs[i];
             ggml_backend_buffer_type_t buft = gctx.backend_buft[i];
@@ -298,24 +299,35 @@ namespace debug {
         }
     }
 
+    static void print_tensor_shape(ggml_tensor * t) {
+        printf("%s.shape = [", t->name);
+        for (int i = 0; i < ggml_n_dims(t); ++i) {
+            printf("%" PRId64, t->ne[i]);
+            if (i < ggml_n_dims(t) - 1) {
+                printf(", ");
+            }
+        }
+        printf("]\n");
+    }
+
     static void print_tensor_data(ggml_tensor * t, uint8_t * data, int64_t n = 3) {
         ggml_type type = t->type;
         int64_t * ne = t->ne;
         size_t * nb = t->nb;
         for (int64_t i3 = 0; i3 < ne[3]; i3++) {
-            printf("                                     [\n");
+            printf("    [\n");
             for (int64_t i2 = 0; i2 < ne[2]; i2++) {
                 if (i2 == n && ne[2] > 2*n) {
-                    printf("                                      ..., \n");
+                    printf("     ..., \n");
                     i2 = ne[2] - n;
                 }
-                printf("                                      [\n");
+                printf("     [\n");
                 for (int64_t i1 = 0; i1 < ne[1]; i1++) {
                     if (i1 == n && ne[1] > 2*n) {
-                        printf("                                       ..., \n");
+                        printf("      ..., \n");
                         i1 = ne[1] - n;
                     }
-                    printf("                                       [");
+                    printf("      [");
                     for (int64_t i0 = 0; i0 < ne[0]; i0++) {
                         if (i0 == n && ne[0] > 2*n) {
                             printf("..., ");
@@ -341,10 +353,10 @@ namespace debug {
                     }
                     printf("],\n");
                 }
-                printf("                                      ],\n");
+                printf("     ],\n");
             }
-            printf("                                     ]\n");
-            //printf("                                     sum = %f\n", sum);
+            printf("    ]\n");
+            //printf("    sum = %f\n", sum);
         }
     }
 } // namespace debug
