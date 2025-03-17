@@ -253,10 +253,6 @@ struct ctx {
         ggml_free(ctx_data);
         gguf_free(ctx_gguf);
         ggml_backend_buffer_free(buf);
-        ggml_backend_free(backend);
-        if (backend_cpu != backend) {
-            ggml_backend_free(backend_cpu);
-        }
     }
 
 private:
