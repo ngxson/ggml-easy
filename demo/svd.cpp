@@ -137,14 +137,6 @@ int main() {
         ggml_tensor * s = utils.new_input("s", GGML_TYPE_F32, rank);
         ggml_tensor * v = utils.new_input("v", GGML_TYPE_F32, rows_A, rank);
 
-        ggml_set_name(u, "u");
-        ggml_set_name(s, "s");
-        ggml_set_name(v, "v");
-
-        ggml_set_input(v);
-        ggml_set_input(s);
-        ggml_set_input(u);
-
         s = ggml_diag(ctx_gf, s);
 
         ggml_tensor * uT = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, u));
@@ -153,10 +145,7 @@ int main() {
         ggml_tensor * A_reconstructed = ggml_mul_mat(ctx_gf, temp, vT);
         utils.mark_output("A_reconstructed", A_reconstructed);
 
-        ggml_tensor * A = ggml_new_tensor_2d(ctx_gf, GGML_TYPE_F32, cols_A, rows_A);
-        ggml_set_name(A, "A");
-        ggml_set_input(A);
-
+        ggml_tensor * A = utils.new_input("A", GGML_TYPE_F32, cols_A, rows_A);
         ggml_tensor * diff = ggml_sum(ctx_gf, ggml_sub(ctx_gf, A, A_reconstructed));
         utils.mark_output("diff", diff);
     });
