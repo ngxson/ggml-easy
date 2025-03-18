@@ -158,15 +158,26 @@ int main() {
         ggml_tensor * uT = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, u));
         ggml_tensor * vT = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, v));
         ggml_tensor * temp = ggml_mul_mat(ctx_gf, s, uT);
-        ggml_tensor * result = ggml_mul_mat(ctx_gf, temp, vT);
+        ggml_tensor * A_reconstructed = ggml_mul_mat(ctx_gf, temp, vT);
 
-        ggml_set_name(result, "result");
-        ggml_build_forward_expand(gf, result);
+        ggml_set_name(A_reconstructed, "A_reconstructed");
+        ggml_set_output(A_reconstructed);
+        ggml_build_forward_expand(gf, A_reconstructed);
+
+        ggml_tensor * A = ggml_new_tensor_2d(ctx_gf, GGML_TYPE_F32, cols_A, rows_A);
+        ggml_set_name(A, "A");
+        ggml_set_input(A);
+
+        ggml_tensor * diff = ggml_sum(ctx_gf, ggml_sub(ctx_gf, A, A_reconstructed));
+        ggml_set_name(diff, "diff");
+        ggml_set_output(diff);
+        ggml_build_forward_expand(gf, diff);
     });
 
     ctx.set_tensor_data("u", data_u.data());
     ctx.set_tensor_data("s", data_s.data());
     ctx.set_tensor_data("v", data_v.data());
+    ctx.set_tensor_data("A", matrix_A);
 
     status = ctx.compute(gf);
     if (status != GGML_STATUS_SUCCESS) {
@@ -174,7 +185,8 @@ int main() {
         return 1;
     }
 
-    print_result(ctx, "result");
+    print_result(ctx, "A_reconstructed");
+    print_result(ctx, "diff");
 
     return 0;
 }
