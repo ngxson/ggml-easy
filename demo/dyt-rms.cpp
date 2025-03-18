@@ -23,22 +23,20 @@ int main() {
     {
         ggml_easy::ctx ctx(params);
 
-        ggml_cgraph * gf = ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf) {
-            ggml_tensor * cur = ggml_new_tensor_2d(ctx_gf, GGML_TYPE_F32, n_embd, n_tokens);
-            ggml_set_name(cur, "input");
+         ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf, auto & utils) {
+            ggml_tensor * cur = utils.new_input("input", GGML_TYPE_F32, n_embd, n_tokens);
             for (int i = 0; i < n_run; i++) {
                 cur = ggml_rms_norm(ctx_gf, cur, 1e-6);
                 // skip bias
             }
-            ggml_set_name(cur, "result");
-            ggml_build_forward_expand(gf, cur);
+            utils.mark_output("result", cur);
         });
 
         std::vector<float> vec(n_embd * n_tokens, 0.5f);
         ctx.set_tensor_data("input", vec.data());
 
         int64_t t_start = ggml_time_ms();
-        ctx.compute(gf);
+        ctx.compute();
         int64_t t_end = ggml_time_ms();
 
         std::cout << "RMS Norm: " << (t_end - t_start) << " ms" << std::endl;
@@ -48,13 +46,10 @@ int main() {
     {
         ggml_easy::ctx ctx(params);
 
-        ggml_cgraph * gf = ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf) {
-            ggml_tensor * cur = ggml_new_tensor_2d(ctx_gf, GGML_TYPE_F32, n_embd, n_tokens);
-            ggml_set_name(cur, "input");
-            ggml_tensor * alpha = ggml_new_tensor_1d(ctx_gf, GGML_TYPE_F32, n_embd);
-            ggml_set_name(alpha, "alpha");
-            ggml_tensor * gamma = ggml_new_tensor_1d(ctx_gf, GGML_TYPE_F32, n_embd);
-            ggml_set_name(gamma, "gamma");
+        ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf, auto & utils) {
+            ggml_tensor * cur   = utils.new_input("input", GGML_TYPE_F32, n_embd, n_tokens);
+            ggml_tensor * alpha = utils.new_input("alpha", GGML_TYPE_F32, n_embd);
+            ggml_tensor * gamma = utils.new_input("gamma", GGML_TYPE_F32, n_embd);
             for (int i = 0; i < n_run; i++) {
                 // DyT(x) = gamma * tanh(alpha * x) + β
                 cur = ggml_mul(ctx_gf, cur, alpha);
@@ -62,8 +57,7 @@ int main() {
                 cur = ggml_mul(ctx_gf, cur, gamma);
                 // skip beta
             }
-            ggml_set_name(cur, "result");
-            ggml_build_forward_expand(gf, cur);
+            utils.mark_output("result", cur);
         });
 
         std::vector<float> vec(n_embd * n_tokens, 0.5f);
@@ -72,7 +66,7 @@ int main() {
         ctx.set_tensor_data("gamma", vec.data());
 
         int64_t t_start = ggml_time_ms();
-        ctx.compute(gf);
+        ctx.compute();
         int64_t t_end = ggml_time_ms();
 
         std::cout << "DyT     : " << (t_end - t_start) << " ms" << std::endl;

@@ -22,14 +22,11 @@ int main() {
     };
 
     // create cgraph
-    ggml_cgraph * gf = ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf) {
-        ggml_tensor * a = ggml_new_tensor_2d(ctx_gf, GGML_TYPE_F32, cols_A, rows_A);
-        ggml_set_name(a, "a");
-        ggml_tensor * b = ggml_new_tensor_2d(ctx_gf, GGML_TYPE_F32, cols_B, rows_B);
-        ggml_set_name(b, "b");
+    ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf, auto & utils) {
+        ggml_tensor * a = utils.new_input("a", GGML_TYPE_F32, cols_A, rows_A);
+        ggml_tensor * b = utils.new_input("b", GGML_TYPE_F32, cols_B, rows_B);
         ggml_tensor * result = ggml_mul_mat(ctx_gf, a, b);
-        ggml_set_name(result, "result");
-        ggml_build_forward_expand(gf, result);
+        utils.mark_output("result", result);
     });
 
     // set data
@@ -40,7 +37,7 @@ int main() {
     ggml_easy::debug::print_backend_buffer_info(ctx);
 
     // compute
-    ggml_status status = ctx.compute(gf);
+    ggml_status status = ctx.compute();
     if (status != GGML_STATUS_SUCCESS) {
         std::cerr << "error: ggml compute return status: " << status << std::endl;
         return 1;

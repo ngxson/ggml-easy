@@ -42,6 +42,7 @@ struct ctx {
 
     std::vector<ggml_tensor *> tensors;
 
+    ggml_cgraph * gf = nullptr;
     std::vector<uint8_t> buf_compute_meta;
     int max_nodes;
 
@@ -155,10 +156,41 @@ struct ctx {
         ggml_free(meta);
     }
 
+    struct build_utils {
+        ggml_context * gf_ctx;
+        ggml_cgraph *  gf;
+        build_utils(ggml_context * gf_ctx, ggml_cgraph * gf) : gf_ctx(gf_ctx), gf(gf) {}
+        /**
+         * Add an input tensor, this function does these steps:
+         * 1. ggml_new_tensor_4d
+         * 2. ggml_set_name
+         * 3. ggml_set_input
+         */
+        ggml_tensor * new_input(const char * name, ggml_type dtype, int64_t ne0, int64_t ne1 = 1, int64_t ne2 = 1, int64_t ne3 = 1) {
+            ggml_tensor * t = ggml_new_tensor_4d(gf_ctx, dtype, ne0, ne1, ne2, ne3);
+            ggml_set_name(t, name);
+            ggml_set_input(t);
+            return t;
+        }
+        /**
+         * Mark this tensor as output, this function does these steps:
+         * 1. ggml_set_name
+         * 2. ggml_set_output
+         * 3. ggml_build_forward_expand
+         */
+        void mark_output(const char * name, ggml_tensor * t) {
+            ggml_set_name(t, name);
+            ggml_set_output(t);
+            ggml_build_forward_expand(gf, t);
+        }
+    };
+
     /**
-     * Build a cgraph using the given builder function
+     * Build a cgraph using the given builder function.
+     * 
+     * The built cgraph will be stored in `ctx.gf`
      */
-    ggml_cgraph * build_graph(std::function<void(ggml_context *, ggml_cgraph *)> builder_fn) {
+    void build_graph(std::function<void(ggml_context *, ggml_cgraph *, build_utils &)> builder_fn) {
         ggml_free(ctx_gf);
         struct ggml_init_params params = {
             /*.mem_size   =*/ buf_compute_meta.size(),
@@ -168,18 +200,27 @@ struct ctx {
 
         ctx_gf = ggml_init(params);
         ggml_backend_sched_reset(sched.get());
-        struct ggml_cgraph * gf = ggml_new_graph_custom(ctx_gf, max_nodes, false);
+        gf = ggml_new_graph_custom(ctx_gf, max_nodes, false);
 
-        builder_fn(ctx_gf, gf);
+        build_utils utils(ctx_gf, gf);
+
+        builder_fn(ctx_gf, gf, utils);
         ggml_backend_sched_alloc_graph(sched.get(), gf);
+    }
 
-        return gf;
+    /**
+     * Same as `build_graph` but without `build_utils`
+     */
+    void build_graph(std::function<void(ggml_context *, ggml_cgraph *)> builder_fn) {
+        build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf, build_utils & utils) {
+            builder_fn(ctx_gf, gf);
+        });
     }
 
     /**
      * Compute the given cgraph
      */
-    ggml_status compute(ggml_cgraph * gf) {
+    ggml_status compute() {
         return ggml_backend_sched_graph_compute(sched.get(), gf);
     }
 

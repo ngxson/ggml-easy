@@ -54,13 +54,9 @@ int main() {
         return std::vector<ggml_tensor *>{u, s, v};
     };
 
-    ggml_cgraph * gf = ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf) {
-        ggml_tensor * A = ggml_new_tensor_2d(ctx_gf, GGML_TYPE_F32, cols_A, rows_A);
-        ggml_set_name(A, "A");
-        ggml_set_input(A);
-        ggml_tensor * x = ggml_new_tensor_1d(ctx_gf, GGML_TYPE_F32, rows_A);
-        ggml_set_name(x, "x");
-        ggml_set_input(x);
+    ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf, auto & utils) {
+        ggml_tensor * A = utils.new_input("A", GGML_TYPE_F32, cols_A, rows_A);
+        ggml_tensor * x = utils.new_input("x", GGML_TYPE_F32, rows_A);
 
         // normalize x
         x = ggml_div(ctx_gf, x, norm(ctx_gf, x));
@@ -91,13 +87,9 @@ int main() {
             }
         }
 
-        ggml_set_name(out_u, "u");
-        ggml_set_name(out_s, "s");
-        ggml_set_name(out_v, "v");
-
-        ggml_build_forward_expand(gf, out_u);
-        ggml_build_forward_expand(gf, out_s);
-        ggml_build_forward_expand(gf, out_v);
+        utils.mark_output("u", out_u);
+        utils.mark_output("s", out_s);
+        utils.mark_output("v", out_v);
     });
 
     // set data
@@ -116,7 +108,7 @@ int main() {
     ggml_easy::debug::print_backend_buffer_info(ctx);
 
     // compute
-    ggml_status status = ctx.compute(gf);
+    ggml_status status = ctx.compute();
     if (status != GGML_STATUS_SUCCESS) {
         std::cerr << "error: ggml compute return status: " << status << std::endl;
         return 1;
@@ -140,10 +132,10 @@ int main() {
     // VERIFY THE RESULT!!
 
 
-    gf = ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf) {
-        ggml_tensor * u = ggml_new_tensor_2d(ctx_gf, GGML_TYPE_F32, cols_A, rank);
-        ggml_tensor * s = ggml_new_tensor_1d(ctx_gf, GGML_TYPE_F32, rank);
-        ggml_tensor * v = ggml_new_tensor_2d(ctx_gf, GGML_TYPE_F32, rows_A, rank);
+    ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf, auto & utils) {
+        ggml_tensor * u = utils.new_input("u", GGML_TYPE_F32, cols_A, rank);
+        ggml_tensor * s = utils.new_input("s", GGML_TYPE_F32, rank);
+        ggml_tensor * v = utils.new_input("v", GGML_TYPE_F32, rows_A, rank);
 
         ggml_set_name(u, "u");
         ggml_set_name(s, "s");
@@ -159,19 +151,14 @@ int main() {
         ggml_tensor * vT = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, v));
         ggml_tensor * temp = ggml_mul_mat(ctx_gf, s, uT);
         ggml_tensor * A_reconstructed = ggml_mul_mat(ctx_gf, temp, vT);
-
-        ggml_set_name(A_reconstructed, "A_reconstructed");
-        ggml_set_output(A_reconstructed);
-        ggml_build_forward_expand(gf, A_reconstructed);
+        utils.mark_output("A_reconstructed", A_reconstructed);
 
         ggml_tensor * A = ggml_new_tensor_2d(ctx_gf, GGML_TYPE_F32, cols_A, rows_A);
         ggml_set_name(A, "A");
         ggml_set_input(A);
 
         ggml_tensor * diff = ggml_sum(ctx_gf, ggml_sub(ctx_gf, A, A_reconstructed));
-        ggml_set_name(diff, "diff");
-        ggml_set_output(diff);
-        ggml_build_forward_expand(gf, diff);
+        utils.mark_output("diff", diff);
     });
 
     ctx.set_tensor_data("u", data_u.data());
@@ -179,7 +166,7 @@ int main() {
     ctx.set_tensor_data("v", data_v.data());
     ctx.set_tensor_data("A", matrix_A);
 
-    status = ctx.compute(gf);
+    status = ctx.compute();
     if (status != GGML_STATUS_SUCCESS) {
         std::cerr << "error: ggml compute return status: " << status << std::endl;
         return 1;
