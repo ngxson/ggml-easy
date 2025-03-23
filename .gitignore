@@ -35,3 +35,6 @@ build
 .cache
 tmp
 .vscode
+
+/*.gguf
+/*.safetensors

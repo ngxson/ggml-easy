@@ -22,3 +22,8 @@ set(TARGET svd)
 add_executable(${TARGET} demo/svd.cpp)
 target_link_libraries(${TARGET} PRIVATE ggml)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
+
+set(TARGET kyutai-mimi)
+add_executable(${TARGET} demo/kyutai-mimi.cpp)
+target_link_libraries(${TARGET} PRIVATE ggml)
+target_compile_features(${TARGET} PRIVATE cxx_std_17)

@@ -40,6 +40,21 @@ namespace debug {
     static void print_tensor_data(ggml_tensor * t, uint8_t * data, int64_t n = 3);
 }
 
+std::string string_format(const char * fmt, ...) {
+    va_list ap;
+    va_list ap2;
+    va_start(ap, fmt);
+    va_copy(ap2, ap);
+    int size = vsnprintf(NULL, 0, fmt, ap);
+    GGML_ASSERT(size >= 0 && size < INT_MAX); // NOLINT
+    std::vector<char> buf(size + 1);
+    int size2 = vsnprintf(buf.data(), size + 1, fmt, ap2);
+    GGML_ASSERT(size2 == size);
+    va_end(ap2);
+    va_end(ap);
+    return std::string(buf.data(), size);
+}
+
 struct ctx {
     ggml_log_level log_level;
     gguf_context * ctx_gguf = nullptr;
@@ -98,6 +113,9 @@ struct ctx {
      * The GGUF metadata will be loaded into `ctx.ctx_gguf`
      */
     void load_gguf(std::string & fname) {
+        load_gguf(fname.c_str());
+    }
+    void load_gguf(const char * fname) {
         ggml_context * meta = nullptr;
 
         gguf_init_params params = {
@@ -105,7 +123,7 @@ struct ctx {
             /*.ctx      = */ &meta,
         };
 
-        ctx_gguf = gguf_init_from_file(fname.c_str(), params);
+        ctx_gguf = gguf_init_from_file(fname, params);
 
         // load tensors
         const int n_tensors = gguf_get_n_tensors(ctx_gguf);
@@ -141,10 +159,11 @@ struct ctx {
             const char * name = gguf_get_tensor_name(ctx_gguf, i);
             ggml_tensor * cur = ggml_get_tensor(ctx_data, name);
             const size_t offset = gguf_get_data_offset(ctx_gguf) + gguf_get_tensor_offset(ctx_gguf, i);
+            log(GGML_LOG_LEVEL_DEBUG, "%s: Loading tensor \"%s\"\n", __func__, name);
             fin.seekg(offset, std::ios::beg);
             if (!fin) {
                 ggml_free(meta);
-                throw std::runtime_error("failed to seek for tensor: " + std::string(name));
+                throw std::runtime_error(string_format("failed to seek for tensor: %s", name));
             }
             int num_bytes = ggml_nbytes(cur);
             if (ggml_backend_buft_is_host(buft)) {
@@ -157,7 +176,7 @@ struct ctx {
                 ggml_backend_tensor_set(cur, read_buf.data(), 0, num_bytes);
             }
         }
-        log(GGML_LOG_LEVEL_INFO, "%s: Loaded %d tensors\n", __func__, n_tensors);
+        log(GGML_LOG_LEVEL_INFO, "%s: Loaded %d tensors from %s\n", __func__, n_tensors, fname);
         fin.close();
 
         ggml_free(meta);
@@ -256,7 +275,7 @@ struct ctx {
     void set_tensor_data(const std::string & name, const void * data) {
         ggml_tensor * t = ggml_get_tensor(ctx_gf, name.c_str());
         if (!t) {
-            throw std::runtime_error("tensor not found: " + name);
+            throw std::runtime_error(string_format("tensor not found: %s", name.c_str()));
         }
         ggml_backend_tensor_set(t, data, 0, ggml_nbytes(t));
     }
@@ -275,10 +294,10 @@ struct ctx {
     void set_tensor_data(const std::string & name, std::function<float(int, int, int, int)> data_fn) {
         ggml_tensor * t = ggml_get_tensor(ctx_gf, name.c_str());
         if (!t) {
-            throw std::runtime_error("tensor not found: " + name);
+            throw std::runtime_error(string_format("tensor not found: %s", name.c_str()));
         }
         if (t->type != GGML_TYPE_F32) {
-            throw std::runtime_error("tensor type must be GGML_TYPE_F32");
+            throw std::runtime_error(string_format("tensor type must be GGML_TYPE_F32: %s", name.c_str()));
         }
         std::vector<float> data(ggml_nelements(t));
         for (int d3 = 0; d3 < t->ne[3]; ++d3) {
@@ -309,7 +328,7 @@ struct ctx {
     std::pair<ggml_tensor *, std::vector<uint8_t>> get_tensor_data(const std::string & name) {
         ggml_tensor * t = ggml_get_tensor(ctx_gf, name.c_str());
         if (!t) {
-            throw std::runtime_error("tensor not found: " + name);
+            throw std::runtime_error(string_format("tensor not found: %s", name.c_str()));
         }
         std::vector<uint8_t> data(ggml_nbytes(t));
         ggml_backend_tensor_get(t, data.data(), 0, ggml_nbytes(t));
@@ -350,14 +369,21 @@ private:
 
 namespace debug {
     static void print_backend_buffer_info(ctx & gctx) {
+        auto buft_weight = ggml_backend_get_default_buffer_type(gctx.backend);
+        size_t size_weight = ggml_backend_buffer_get_size(gctx.buf);
+        if (size_weight > 1) {
+            printf("%s: %10s weight buffer size = %8.2f MiB\n", __func__,
+                    ggml_backend_buft_name(buft_weight),
+                    size_weight / 1024.0 / 1024.0);
+        }
         for (size_t i = 0; i < gctx.backend_ptrs.size(); ++i) {
             ggml_backend_t backend = gctx.backend_ptrs[i];
             ggml_backend_buffer_type_t buft = gctx.backend_buft[i];
-            size_t size = ggml_backend_sched_get_buffer_size(gctx.sched.get(), backend);
-            if (size > 1) {
+            size_t size_sched = ggml_backend_sched_get_buffer_size(gctx.sched.get(), backend);
+            if (size_sched > 1) {
                 printf("%s: %10s compute buffer size = %8.2f MiB\n", __func__,
                         ggml_backend_buft_name(buft),
-                        size / 1024.0 / 1024.0);
+                        size_sched / 1024.0 / 1024.0);
             }
         }
     }
