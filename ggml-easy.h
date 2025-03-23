@@ -34,6 +34,12 @@ void log_cb(ggml_log_level level, const char * text, void * cur_lvl_ptr) {
     fflush(stderr);
 }
 
+// forward declaration
+namespace debug {
+    static void print_tensor_shape(ggml_tensor * t);
+    static void print_tensor_data(ggml_tensor * t, uint8_t * data, int64_t n = 3);
+}
+
 struct ctx {
     ggml_log_level log_level;
     gguf_context * ctx_gguf = nullptr;
@@ -41,6 +47,7 @@ struct ctx {
     ggml_context * ctx_gf   = nullptr;
 
     std::vector<ggml_tensor *> tensors;
+    std::vector<ggml_tensor *> dbg_printed_tensors;
 
     ggml_cgraph * gf = nullptr;
     std::vector<uint8_t> buf_compute_meta;
@@ -158,7 +165,8 @@ struct ctx {
 
     struct build_utils {
         ggml_context * gf_ctx;
-        ggml_cgraph *  gf;
+        ggml_cgraph  * gf;
+        std::vector<ggml_tensor *> printed_tensors;
         build_utils(ggml_context * gf_ctx, ggml_cgraph * gf) : gf_ctx(gf_ctx), gf(gf) {}
         /**
          * Add an input tensor, this function does these steps:
@@ -178,10 +186,18 @@ struct ctx {
          * 2. ggml_set_output
          * 3. ggml_build_forward_expand
          */
-        void mark_output(const char * name, ggml_tensor * t) {
+        void mark_output(ggml_tensor * t, const char * name) {
             ggml_set_name(t, name);
             ggml_set_output(t);
             ggml_build_forward_expand(gf, t);
+        }
+        /**
+         * Print this tensor as soon as it is computed, useful for debugging.
+         * name is optional, if not provided, the existing name of the tensor will be used
+         */
+        void debug_print(ggml_tensor * t, const char * name = nullptr) {
+            mark_output(t, name ? name : t->name);
+            printed_tensors.push_back(t);
         }
     };
 
@@ -206,6 +222,7 @@ struct ctx {
 
         builder_fn(ctx_gf, gf, utils);
         ggml_backend_sched_alloc_graph(sched.get(), gf);
+        dbg_printed_tensors = std::move(utils.printed_tensors);
     }
 
     /**
@@ -221,7 +238,16 @@ struct ctx {
      * Compute the given cgraph
      */
     ggml_status compute() {
-        return ggml_backend_sched_graph_compute(sched.get(), gf);
+        ggml_status status = ggml_backend_sched_graph_compute(sched.get(), gf);
+        if (status == GGML_STATUS_SUCCESS) {
+            for (ggml_tensor * t : dbg_printed_tensors) {
+                std::vector<uint8_t> data(ggml_nbytes(t));
+                ggml_backend_tensor_get(t, data.data(), 0, ggml_nbytes(t));
+                ggml_easy::debug::print_tensor_shape(t);
+                ggml_easy::debug::print_tensor_data(t, data.data());
+            }
+        }
+        return status;
     }
 
     /**
@@ -347,12 +373,12 @@ namespace debug {
         printf("]\n");
     }
 
-    static void print_tensor_data(ggml_tensor * t, uint8_t * data, int64_t n = 3) {
+    static void print_tensor_data(ggml_tensor * t, uint8_t * data, int64_t n) {
         ggml_type type = t->type;
         int64_t * ne = t->ne;
         size_t * nb = t->nb;
         for (int64_t i3 = 0; i3 < ne[3]; i3++) {
-            printf("    [\n");
+            printf("%s.data: [\n", t->name);
             for (int64_t i2 = 0; i2 < ne[2]; i2++) {
                 if (i2 == n && ne[2] > 2*n) {
                     printf("     ..., \n");

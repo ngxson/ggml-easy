@@ -75,6 +75,9 @@ int main() {
             ggml_tensor * uT = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, u));
             ggml_tensor * A_minus = ggml_mul(ctx_gf, ggml_mul_mat(ctx_gf, uT, vT), s);
             A = ggml_add(ctx_gf, A, ggml_scale(ctx_gf, A_minus, -1));
+            // utils.debug_print(u, "u_intermediate");
+            // utils.debug_print(v, "v_intermediate");
+            // utils.debug_print(A, "A_intermediate");
 
             if (i == 0) {
                 out_u = u;
@@ -87,9 +90,9 @@ int main() {
             }
         }
 
-        utils.mark_output("u", out_u);
-        utils.mark_output("s", out_s);
-        utils.mark_output("v", out_v);
+        utils.mark_output(out_u, "u");
+        utils.mark_output(out_s, "s");
+        utils.mark_output(out_v, "v");
     });
 
     // set data
@@ -143,11 +146,11 @@ int main() {
         ggml_tensor * vT = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, v));
         ggml_tensor * temp = ggml_mul_mat(ctx_gf, s, uT);
         ggml_tensor * A_reconstructed = ggml_mul_mat(ctx_gf, temp, vT);
-        utils.mark_output("A_reconstructed", A_reconstructed);
+        utils.mark_output(A_reconstructed, "A_reconstructed");
 
         ggml_tensor * A = utils.new_input("A", GGML_TYPE_F32, cols_A, rows_A);
         ggml_tensor * diff = ggml_sum(ctx_gf, ggml_sub(ctx_gf, A, A_reconstructed));
-        utils.mark_output("diff", diff);
+        utils.mark_output(diff, "diff");
     });
 
     ctx.set_tensor_data("u", data_u.data());

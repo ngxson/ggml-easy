@@ -29,7 +29,7 @@ int main() {
                 cur = ggml_rms_norm(ctx_gf, cur, 1e-6);
                 // skip bias
             }
-            utils.mark_output("result", cur);
+            utils.mark_output(cur, "result");
         });
 
         std::vector<float> vec(n_embd * n_tokens, 0.5f);
@@ -57,7 +57,7 @@ int main() {
                 cur = ggml_mul(ctx_gf, cur, gamma);
                 // skip beta
             }
-            utils.mark_output("result", cur);
+            utils.mark_output(cur, "result");
         });
 
         std::vector<float> vec(n_embd * n_tokens, 0.5f);

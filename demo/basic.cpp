@@ -2,6 +2,19 @@
 #include "ggml-easy.h"
 #include <iostream>
 
+/**
+ * This example demonstrates how to perform matrix multiplication using ggml-easy.h
+ * 
+ * Given 2 matrices A and B, the result matrix C is calculated as follows:
+ *   C = (A x B) * 2
+ *
+ * We will use utils.debug_print() to debug the intermediate result of (A x B)
+ * Then, we will use utils.mark_output() to get the final result of C
+ *
+ * The final result can be printed using ggml_easy::debug::print_tensor_data()
+ * Or, can be used to perform further computations
+ */
+
 int main() {
     ggml_easy::ctx_params params;
     ggml_easy::ctx ctx(params);
@@ -25,8 +38,10 @@ int main() {
     ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf, auto & utils) {
         ggml_tensor * a = utils.new_input("a", GGML_TYPE_F32, cols_A, rows_A);
         ggml_tensor * b = utils.new_input("b", GGML_TYPE_F32, cols_B, rows_B);
-        ggml_tensor * result = ggml_mul_mat(ctx_gf, a, b);
-        utils.mark_output("result", result);
+        ggml_tensor * a_mul_b = ggml_mul_mat(ctx_gf, a, b);
+        utils.debug_print(a_mul_b, "a_mul_b");
+        ggml_tensor * result = ggml_scale(ctx_gf, a_mul_b, 2);
+        utils.mark_output(result, "result");
     });
 
     // set data
