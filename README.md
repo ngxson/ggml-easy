@@ -32,3 +32,56 @@ cmake -B build
 cmake --build build -j
 # output: build/bin/*
 ```
+
+## Features
+
+### Effortless GPU support
+
+ggml-easy abstracted out all the scheduler and buffer setup. GPU is enabled by default.
+
+To disable it explicitly:
+
+```cpp
+ggml_easy::ctx_params params;
+params.use_gpu = false; // true by default
+ggml_easy::ctx ctx(params);
+```
+
+Please note that the GPU support is for convenience and is not aimed to have the best performance. Some operations will fallback to CPU if the GPU does not support them.
+
+### Define input, output easily
+
+When building computation graph, each input and output nodes can be added with single line of code:
+
+```cpp
+ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf, auto & utils) {
+    ggml_tensor * a = utils.new_input("a", GGML_TYPE_F32, cols_A, rows_A);
+    ggml_tensor * b = utils.new_input("b", GGML_TYPE_F32, cols_B, rows_B);
+    ...
+    utils.mark_output(result, "result");
+});
+```
+
+### Easy debugging
+
+You can also print the intermediate results with minimal effort:
+
+```cpp
+ggml_tensor * a = utils.new_input("a", GGML_TYPE_F32, cols_A, rows_A);
+ggml_tensor * b = utils.new_input("b", GGML_TYPE_F32, cols_B, rows_B);
+ggml_tensor * a_mul_b = ggml_mul_mat(ctx_gf, a, b);
+utils.debug_print(a_mul_b, "a_mul_b");
+```
+
+This will print the intermediate result of `A * B` upon `compute()` is called, no more manual `ggml_backend_tensor_get`!
+
+```
+a_mul_b.shape = [4, 3]
+a_mul_b.data: [
+     [
+      [     60.0000,      55.0000,      50.0000,     110.0000],
+      [     90.0000,      54.0000,      54.0000,     126.0000],
+      [     42.0000,      29.0000,      28.0000,      64.0000],
+     ],
+    ]
+```
