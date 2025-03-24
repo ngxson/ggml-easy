@@ -16,6 +16,7 @@
 #include <cinttypes>
 #include <fstream>
 #include <functional>
+#include <unordered_map>
 
 namespace ggml_easy {
 
@@ -61,7 +62,7 @@ struct ctx {
     ggml_context * ctx_data = nullptr;
     ggml_context * ctx_gf   = nullptr;
 
-    std::vector<ggml_tensor *> tensors;
+    std::unordered_map<std::string, ggml_tensor *> tensors;
     std::vector<ggml_tensor *> dbg_printed_tensors;
 
     ggml_cgraph * gf = nullptr;
@@ -107,9 +108,19 @@ struct ctx {
         buf_compute_meta.resize(max_nodes * ggml_tensor_overhead() + ggml_graph_overhead());
     }
 
+    template <typename ...Params>
+    ggml_tensor * get_weight(Params&&... params) {
+        std::string name = string_format(std::forward<Params>(params)...);
+        auto it = tensors.find(name);
+        if (it == tensors.end()) {
+            throw std::runtime_error(string_format("weight tensor not found: %s", name.c_str()));
+        }
+        return it->second;
+    }
+
     /**
      * Load a GGUF model file
-     * The tensors will be loaded into the context and can be accessed via `ctx.tensors`
+     * The tensors will be loaded into the context and can be accessed via `ctx.get_weight(name)`
      * The GGUF metadata will be loaded into `ctx.ctx_gguf`
      */
     void load_gguf(std::string & fname) {
@@ -148,7 +159,7 @@ struct ctx {
             ggml_tensor * t = ggml_get_tensor(meta, name);
             ggml_tensor * cur = ggml_dup_tensor(ctx_data, t);
             ggml_set_name(cur, name);
-            tensors.push_back(cur);
+            tensors.insert({name, cur});
         }
 
         // alloc memory and offload data
@@ -214,8 +225,10 @@ struct ctx {
          * Print this tensor as soon as it is computed, useful for debugging.
          * name is optional, if not provided, the existing name of the tensor will be used
          */
-        void debug_print(ggml_tensor * t, const char * name = nullptr) {
-            mark_output(t, name ? name : t->name);
+        template <typename ...Params>
+        void debug_print(ggml_tensor * t, Params&&... params) {
+            std::string name = string_format(std::forward<Params>(params)...);
+            mark_output(t, name.c_str());
             printed_tensors.push_back(t);
         }
     };
@@ -366,6 +379,8 @@ private:
         va_end(args_copy);
     }
 };
+
+using gf_build_fn = std::function<void(ggml_context *, ggml_cgraph *, ctx::build_utils &)>;
 
 namespace debug {
     static void print_backend_buffer_info(ctx & gctx) {
