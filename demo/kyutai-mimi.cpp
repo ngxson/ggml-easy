@@ -16,6 +16,10 @@
 std::array<int, 4> upsampling_ratio   = {8, 6, 5, 4};
 std::array<int, 4> downsampling_ratio = {4, 5, 6, 8}; // reverse of upsampling_ratio
 
+static int64_t div_ceil(int64_t a, int64_t b) {
+    return a / b + (a % b ? 1 : 0);
+}
+
 struct mimi_encoder {
     struct layer {
         bool is_elu = false;
@@ -68,38 +72,19 @@ struct mimi_encoder {
     ggml_tensor * forward(ggml_context * ctx0, ggml_easy::ctx::build_utils & utils, ggml_tensor * input) {
         ggml_tensor * x = input;
 
-        auto mimi_conv_1d = [&ctx0](ggml_tensor * x, ggml_tensor * kernel, ggml_tensor * bias, int stride, int dilation) {
+        auto mimi_conv_1d = [&ctx0, &utils](ggml_tensor * x, ggml_tensor * kernel, ggml_tensor * bias, int stride, int dilation) {
             int64_t kernel_size = (kernel->ne[0] - 1) * dilation + 1;
             int64_t p_total = kernel_size - stride; // padding total
             int64_t p_half = p_total / 2;
             int64_t is_p_odd = p_total % 2; // is padding odd
 
-            int64_t n_frames = (x->ne[0] - kernel_size + p_total) / stride + 1;
+            int64_t n_frames = div_ceil(x->ne[0] - kernel_size + p_total, stride);
             int64_t ideal_len = n_frames * stride + kernel_size - p_total;
             int64_t p_extra = ideal_len - x->ne[0];
-            /*printf("ideal_len: %ld, p_extra: %ld\n", ideal_len, p_extra);
-            if (p_extra > 0) {
-                ggml_tensor * zeros = ggml_new_tensor_2d(ctx0, x->type, p_extra, x->ne[1]);
-                ggml_easy::debug::print_tensor_shape(x);
-                ggml_easy::debug::print_tensor_shape(zeros);
-                zeros = ggml_scale(ctx0, zeros, 0.0f);
-                x = ggml_concat(ctx0, x, zeros, 0);
-            }
-
-
-            if (is_p_odd) {
-                // if odd, we add one padding column to the left
-                ggml_tensor * zeros = ggml_new_tensor_2d(ctx0, x->type, 1, x->ne[1]);
-                zeros = ggml_scale(ctx0, zeros, 0.0f);
-                x = ggml_concat(ctx0, zeros, x, 0);
-                ggml_set_name(x, "mimi_conv_1d_pad");
-                ggml_easy::debug::print_tensor_shape(x);
-            }*/
 
             int64_t p_right = p_half + p_extra;
             int64_t p_left = p_total - p_half;
-            //printf("ideal_len: %ld, p_extra: %ld\n", ideal_len, p_extra);
-            printf("p_total: %ld, p_left: %ld, p_right: %ld, p_extra: %ld\n", p_total, p_left, p_right, p_extra);
+            ggml_easy::debug::print_tensor_shape(x);
 
             // add padding
             if (p_left > 0) {
@@ -113,7 +98,6 @@ struct mimi_encoder {
                 x = ggml_concat(ctx0, x, zeros, 0);
             }
 
-            //printf("kernel_size: %ld, padding_total: %ld, padding: %ld\n", kernel_size, p_total, p_half);
             x = ggml_conv_1d(ctx0, kernel, x, stride, 0, dilation);
             bias = ggml_cont(ctx0, ggml_transpose(ctx0, bias)); // TODO: do this at conversion time
             x = ggml_add(ctx0, x, bias);
