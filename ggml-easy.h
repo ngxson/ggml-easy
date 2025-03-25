@@ -312,12 +312,13 @@ struct ctx {
         if (t->type != GGML_TYPE_F32) {
             throw std::runtime_error(string_format("tensor type must be GGML_TYPE_F32: %s", name.c_str()));
         }
+        ggml_easy::debug::print_tensor_shape(t);
         std::vector<float> data(ggml_nelements(t));
         for (int d3 = 0; d3 < t->ne[3]; ++d3) {
             for (int d2 = 0; d2 < t->ne[2]; ++d2) {
                 for (int d1 = 0; d1 < t->ne[1]; ++d1) {
                     for (int d0 = 0; d0 < t->ne[0]; ++d0) {
-                        int i = d3 * t->nb[3] + d2 * t->nb[2] + d1 * t->nb[1] + d0 * t->nb[0];
+                        int i = d3 * t->ne[2] + d2 * t->ne[1] + d1 * t->ne[0] + d0;
                         data[i] = data_fn(d0, d1, d2, d3);
                     }
                 }
