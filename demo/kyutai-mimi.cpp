@@ -20,7 +20,10 @@ static int64_t div_ceil(int64_t a, int64_t b) {
     return a / b + (a % b ? 1 : 0);
 }
 
+// based on MimiEncoder
+// SEANet encoder as used by Mimi.
 struct mimi_encoder {
+    bool causal = true;
     struct layer {
         bool is_elu = false;
         bool is_resnet = false;
@@ -72,7 +75,8 @@ struct mimi_encoder {
     ggml_tensor * forward(ggml_context * ctx0, ggml_easy::ctx::build_utils & utils, ggml_tensor * input) {
         ggml_tensor * x = input;
 
-        auto mimi_conv_1d = [&ctx0, &utils](ggml_tensor * x, ggml_tensor * kernel, ggml_tensor * bias, int stride, int dilation) {
+        // based on MimiConv1d
+        auto mimi_conv_1d = [&](ggml_tensor * x, ggml_tensor * kernel, ggml_tensor * bias, int stride, int dilation) {
             int64_t kernel_size = (kernel->ne[0] - 1) * dilation + 1;
             int64_t p_total = kernel_size - stride; // padding total
             int64_t p_half = p_total / 2;
@@ -82,11 +86,10 @@ struct mimi_encoder {
             int64_t ideal_len = n_frames * stride + kernel_size - p_total;
             int64_t p_extra = ideal_len - x->ne[0];
 
-            int64_t p_right = p_half + p_extra;
-            int64_t p_left = p_total - p_half;
-            ggml_easy::debug::print_tensor_shape(x);
+            int64_t p_right = (causal ? 0 : p_half) + p_extra;
+            int64_t p_left = p_total - (causal ? 0 : p_half);
 
-            // add padding
+            // add asymmetric padding
             if (p_left > 0) {
                 ggml_tensor * zeros = ggml_new_tensor_2d(ctx0, x->type, p_left, x->ne[1]);
                 zeros = ggml_scale(ctx0, zeros, 0.0f);
@@ -105,9 +108,8 @@ struct mimi_encoder {
             return x;
         };
 
-        int i = 0;
+        // int i = 0; // for debugging
         for (auto & layer : layers) {
-            printf("\n -- layer %d -- \n", i);
             if (layer.is_elu) {
                 x = ggml_elu(ctx0, x);
             } else if (layer.is_resnet) {
@@ -120,9 +122,7 @@ struct mimi_encoder {
             } else {
                 x = mimi_conv_1d(x, layer.conv_0_w, layer.conv_0_b, layer.stride, 1);
             }
-            utils.debug_print(x, "after_layer_%d", i);
-            ggml_easy::debug::print_tensor_shape(x);
-            i++;
+            // utils.debug_print(x, "after_layer_%d", i); i++;
         }
 
         return x;
@@ -145,8 +145,8 @@ int main() {
     ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf, auto & utils) {
         ggml_tensor * input = utils.new_input("input", GGML_TYPE_F32, 2048);
         ggml_tensor * output = encoder.forward(ctx_gf, utils, input);
+        utils.debug_print(output, "output");
         utils.mark_output(output, "output");
-        //ggml_graph_dump_dot(gf, nullptr, "mimi.dot");
     });
 
     ctx.set_tensor_data("input", [](int, int, int, int) { return 1.0f; });
