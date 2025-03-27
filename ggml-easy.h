@@ -385,12 +385,14 @@ using gf_build_fn = std::function<void(ggml_context *, ggml_cgraph *, ctx::build
 
 namespace debug {
     static void print_backend_buffer_info(ctx & gctx) {
-        auto buft_weight = ggml_backend_get_default_buffer_type(gctx.backend);
-        size_t size_weight = ggml_backend_buffer_get_size(gctx.buf);
-        if (size_weight > 1) {
-            printf("%s: %10s weight buffer size = %8.2f MiB\n", __func__,
-                    ggml_backend_buft_name(buft_weight),
-                    size_weight / 1024.0 / 1024.0);
+        if (gctx.backend && gctx.buf) {
+            auto buft_weight = ggml_backend_get_default_buffer_type(gctx.backend);
+            size_t size_weight = ggml_backend_buffer_get_size(gctx.buf);
+            if (size_weight > 1) {
+                printf("%s: %10s weight buffer size = %8.2f MiB\n", __func__,
+                        ggml_backend_buft_name(buft_weight),
+                        size_weight / 1024.0 / 1024.0);
+            }
         }
         for (size_t i = 0; i < gctx.backend_ptrs.size(); ++i) {
             ggml_backend_t backend = gctx.backend_ptrs[i];
