@@ -13,11 +13,8 @@
  * Note: do NOT upload the gguf to the internet, it is NOT compatible with llama.cpp and people will complain.
  */
 
-static int64_t div_ceil(int64_t a, int64_t b) {
-    return a / b + (a % b ? 1 : 0);
-}
-
 struct mimi_config_t {
+    bool causal = true;
     int max_position_embeddings = 8000;
     int num_hidden_layers = 8;
     int n_embd = 512;
@@ -32,10 +29,72 @@ struct mimi_config_t {
     std::array<int, 4> downsampling_ratio = {4, 5, 6, 8}; // reverse of upsampling_ratio
 } mimi_config;
 
+// TODO: add this to the library (ofc with a more optimized kernel)
+// mode: (0) constant, (1) reflect, (2) replicate, (3) circular
+// value is only used in "constant"
+// only "constant" with 0.0f and "replicate" are implemented here
+static ggml_tensor * ggml_pad_ext(ggml_context * ctx0, ggml_tensor * x, int mode,
+        int64_t pad_left, int64_t pad_right, float value = 0.0f) {
+    GGML_ASSERT(value == 0.0f); // we can technically use ggml_arange, but for simplication we only support 0.0f
+    GGML_ASSERT(mode == 0 || mode == 2);
+    if (pad_left > 0) {
+        ggml_tensor * tmp = ggml_new_tensor_2d(ctx0, x->type, pad_left, x->ne[1]);
+        if (mode == 0) {
+            tmp = ggml_scale(ctx0, tmp, value);
+        } else if (mode == 2) {
+            ggml_tensor * elem = ggml_view_2d(ctx0, x, 1, x->ne[1], x->nb[1], 0); // get first column
+            tmp = ggml_repeat(ctx0, elem, tmp);
+        }
+        x = ggml_concat(ctx0, tmp, x, 0);
+    }
+    if (pad_right > 0) {
+        ggml_tensor * tmp = ggml_new_tensor_2d(ctx0, x->type, pad_right, x->ne[1]);
+        if (mode == 0) {
+            tmp = ggml_scale(ctx0, tmp, value);
+        } else if (mode == 2) {
+            int64_t last = x->ne[0] - 1;
+            ggml_tensor * elem = ggml_view_2d(ctx0, x, 1, x->ne[1], x->nb[1], last * ggml_element_size(x)); // get last column
+            tmp = ggml_repeat(ctx0, elem, tmp);
+        }
+        x = ggml_concat(ctx0, x, tmp, 0);
+    }
+    return x;
+}
+
+static int64_t div_ceil(int64_t a, int64_t b) {
+    return a / b + (a % b ? 1 : 0);
+}
+
+static ggml_tensor * mimi_conv_1d(ggml_easy::ctx::build_utils & utils, ggml_context * ctx0, ggml_tensor * x,
+        ggml_tensor * kernel, ggml_tensor * bias, int stride, int dilation, bool pad_zero = true) {
+    int64_t kernel_size = (kernel->ne[0] - 1) * dilation + 1;
+    int64_t p_total = kernel_size - stride; // padding total
+    int64_t p_half = p_total / 2;
+    int64_t is_p_odd = p_total % 2; // is padding odd
+
+    int64_t n_frames = div_ceil(x->ne[0] - kernel_size + p_total, stride);
+    int64_t ideal_len = n_frames * stride + kernel_size - p_total;
+    int64_t p_extra = ideal_len - x->ne[0];
+
+    int64_t p_right = (mimi_config.causal ? 0 : p_half) + p_extra;
+    int64_t p_left = p_total - (mimi_config.causal ? 0 : p_half);
+
+    x = ggml_pad_ext(ctx0, x, pad_zero ? 0 : 2, p_left, p_right);
+    // utils.debug_print(x, "mimi_conv_1d_padded");
+
+    kernel = ggml_cast(ctx0, kernel, GGML_TYPE_F16); // TODO: do this at conversion time
+    x = ggml_conv_1d(ctx0, kernel, x, stride, 0, dilation);
+    if (bias) {
+        bias = ggml_cont(ctx0, ggml_transpose(ctx0, bias)); // TODO: do this at conversion time
+        x = ggml_add(ctx0, x, bias);
+    }
+    ggml_set_name(x, "mimi_conv_1d");
+    return x;
+};
+
 // based on MimiEncoder
 // SEANet encoder as used by Mimi.
 struct mimi_encoder {
-    bool causal = true;
     struct layer {
         bool is_elu = false;
         bool is_resnet = false;
@@ -87,40 +146,6 @@ struct mimi_encoder {
     ggml_tensor * forward(ggml_context * ctx0, ggml_easy::ctx::build_utils & utils, ggml_tensor * input) {
         ggml_tensor * x = input;
 
-        // based on MimiConv1d
-        auto mimi_conv_1d = [&](ggml_tensor * x, ggml_tensor * kernel, ggml_tensor * bias, int stride, int dilation) {
-            int64_t kernel_size = (kernel->ne[0] - 1) * dilation + 1;
-            int64_t p_total = kernel_size - stride; // padding total
-            int64_t p_half = p_total / 2;
-            int64_t is_p_odd = p_total % 2; // is padding odd
-
-            int64_t n_frames = div_ceil(x->ne[0] - kernel_size + p_total, stride);
-            int64_t ideal_len = n_frames * stride + kernel_size - p_total;
-            int64_t p_extra = ideal_len - x->ne[0];
-
-            int64_t p_right = (causal ? 0 : p_half) + p_extra;
-            int64_t p_left = p_total - (causal ? 0 : p_half);
-
-            // add asymmetric padding
-            if (p_left > 0) {
-                ggml_tensor * zeros = ggml_new_tensor_2d(ctx0, x->type, p_left, x->ne[1]);
-                zeros = ggml_scale(ctx0, zeros, 0.0f);
-                x = ggml_concat(ctx0, zeros, x, 0);
-            }
-            if (p_right > 0) {
-                ggml_tensor * zeros = ggml_new_tensor_2d(ctx0, x->type, p_right, x->ne[1]);
-                zeros = ggml_scale(ctx0, zeros, 0.0f);
-                x = ggml_concat(ctx0, x, zeros, 0);
-            }
-
-            kernel = ggml_cast(ctx0, kernel, GGML_TYPE_F16); // TODO: do this at conversion time
-            x = ggml_conv_1d(ctx0, kernel, x, stride, 0, dilation);
-            bias = ggml_cont(ctx0, ggml_transpose(ctx0, bias)); // TODO: do this at conversion time
-            x = ggml_add(ctx0, x, bias);
-            ggml_set_name(x, "mimi_conv_1d");
-            return x;
-        };
-
         // int i = 0; // for debugging
         for (auto & layer : layers) {
             if (layer.is_elu) {
@@ -128,12 +153,12 @@ struct mimi_encoder {
             } else if (layer.is_resnet) {
                 ggml_tensor * residual = x;
                 x = ggml_elu(ctx0, x);
-                x = mimi_conv_1d(x, layer.conv_0_w, layer.conv_0_b, 1, 1);
+                x = mimi_conv_1d(utils, ctx0, x, layer.conv_0_w, layer.conv_0_b, 1, 1);
                 x = ggml_elu(ctx0, x);
-                x = mimi_conv_1d(x, layer.conv_1_w, layer.conv_1_b, 1, 1);
+                x = mimi_conv_1d(utils, ctx0, x, layer.conv_1_w, layer.conv_1_b, 1, 1);
                 x = ggml_add(ctx0, x, residual);
             } else {
-                x = mimi_conv_1d(x, layer.conv_0_w, layer.conv_0_b, layer.stride, 1);
+                x = mimi_conv_1d(utils, ctx0, x, layer.conv_0_w, layer.conv_0_b, layer.stride, 1);
             }
             // utils.debug_print(x, "after_layer_%d", i); i++;
         }
@@ -193,6 +218,7 @@ struct mimi_transformer {
             return x;
         };
 
+        // TODO: do this at conversion time, see LlamaModel.permute in convert_hf_to_gguf.py
         auto llama_permute = [&](ggml_tensor * w) {
             int n_head = mimi_config.n_head;
             ggml_tensor * tmp = ggml_reshape_4d(ctx0, w, w->ne[0], w->ne[1] / n_head / 2, 2, n_head);
@@ -211,7 +237,6 @@ struct mimi_transformer {
 
             // input layer norm
             x = layer_norm(x, layer.inp_norm_w, layer.inp_norm_b);
-            utils.debug_print(x, "inp_normed_layer_%d", i);
 
             // self attention
             {
@@ -227,14 +252,14 @@ struct mimi_transformer {
                 int n_rot = n_embd_head;
                 q = ggml_rope_inplace(ctx0, q, inp_pos, n_rot, 0);
                 q = ggml_cont(ctx0, ggml_permute(ctx0, q, 0, 2, 1, 3));
-                utils.debug_print(q, "q rope");
+                // utils.debug_print(q, "q rope");
 
                 k = ggml_rope_inplace(ctx0, k, inp_pos, n_rot, 0);
                 k = ggml_cont(ctx0, ggml_permute(ctx0, k, 0, 2, 1, 3));
-                utils.debug_print(k, "k rope");
+                // utils.debug_print(k, "k rope");
 
                 ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
-                ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+                ggml_mul_mat_set_prec(kq, GGML_PREC_F32); // mimic behavior of llama.cpp
                 kq = ggml_scale_inplace(ctx0, kq, 1.0f / std::sqrt(n_embd_head));
                 ggml_tensor * kq_masked = ggml_diag_mask_inf_inplace(ctx0, kq, n_tokens);
                 kq = ggml_soft_max_inplace(ctx0, kq_masked);
@@ -243,12 +268,11 @@ struct mimi_transformer {
                 v = ggml_cont(ctx0, ggml_permute(ctx0, v, 1, 2, 0, 3));
 
                 ggml_tensor * kqv = ggml_mul_mat(ctx0, v, kq);
-                ggml_mul_mat_set_prec(kqv, GGML_PREC_F32);
                 kqv = ggml_reshape_3d(ctx0, kqv, n_embd_head, n_tokens, mimi_config.n_head);
                 kqv = ggml_permute(ctx0, kqv, 0, 2, 1, 3);
                 kqv = ggml_cont_2d(ctx0, kqv, mimi_config.n_embd, n_tokens);
-                utils.debug_print(kqv, "kqv");
-                utils.debug_print(ggml_sum(ctx0, kqv), "kqv_sum");
+                // utils.debug_print(kqv, "kqv");
+                // utils.debug_print(ggml_sum(ctx0, kqv), "kqv_sum");
 
                 x = ggml_mul_mat(ctx0, layer.attn_o, kqv);
             }
@@ -256,7 +280,7 @@ struct mimi_transformer {
             // residual
             x = ggml_mul(ctx0, x, layer.attn_layer_scale);
             x = ggml_add(ctx0, x, residual);
-            utils.debug_print(x, "after_attn_%d", i);
+            // utils.debug_print(x, "after_attn_%d", i);
 
             residual = x;
             x = layer_norm(x, layer.attn_post_norm_w, layer.attn_post_norm_b);
@@ -271,8 +295,8 @@ struct mimi_transformer {
             // residual
             x = ggml_mul(ctx0, x, layer.mlp_layer_scale);
             x = ggml_add(ctx0, x, residual);
-            utils.debug_print(x, "output_layer_%d", i);
-            utils.debug_print(ggml_sum(ctx0, x), "output_layer_%d_sum", i); i++;
+            // utils.debug_print(x, "output_layer_%d", i);
+            // utils.debug_print(ggml_sum(ctx0, x), "output_layer_%d_sum", i); i++;
         }
 
         return x;
@@ -296,15 +320,24 @@ int main() {
     int n_pos = -1;
     ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf, auto & utils) {
         ggml_tensor * input = utils.new_input("input", GGML_TYPE_F32, 2048);
+
+        // SEANET encoder
         ggml_tensor * embeddings = encoder.forward(ctx_gf, utils, input);
         utils.debug_print(embeddings, "embeddings");
 
+        // transformer
         n_pos = embeddings->ne[0];
         ggml_tensor * inp_pos = utils.new_input("positions", GGML_TYPE_I32, n_pos);
-
         embeddings = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, embeddings));
-        ggml_tensor * output = encoder_transformer.forward(ctx_gf, utils, embeddings, inp_pos);
-        utils.mark_output(output, "output");
+        embeddings = encoder_transformer.forward(ctx_gf, utils, embeddings, inp_pos);
+        utils.debug_print(embeddings, "embeddings_after_transformer");
+
+        // downsample
+        embeddings = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, embeddings));
+        embeddings = mimi_conv_1d(utils, ctx_gf, embeddings, ctx.get_weight("downsample.conv.weight"), nullptr, 2, 1, false);
+
+        utils.debug_print(embeddings, "output");
+        utils.mark_output(embeddings, "output");
     });
 
     ctx.set_tensor_data("input", [](int, int, int, int) { return 1.0f; });
