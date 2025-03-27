@@ -1,6 +1,7 @@
 #include "ggml.h"
 #include "ggml-easy.h"
 #include <iostream>
+#include <float.h>
 
 
 /**
@@ -27,9 +28,21 @@ struct mimi_config_t {
     int sliding_window = 250;
     std::array<int, 4> upsampling_ratio   = {8, 6, 5, 4};
     std::array<int, 4> downsampling_ratio = {4, 5, 6, 8}; // reverse of upsampling_ratio
+    // vector quantizer
+    float frame_rate = 12.5;
+    int audio_channels = 1;
+    int codebook_size = 2048;
+    int codebook_dim = 512;
+    int n_semantic_components = 1;
+    int n_acoustic_components = 31;
 } mimi_config;
 
-// TODO: add this to the library (ofc with a more optimized kernel)
+
+///////////////////////////////////////////////////////////////////////////
+// extension to ggml.h
+// TODO: add these ops to the library (ofc with a more optimized kernel)
+
+
 // mode: (0) constant, (1) reflect, (2) replicate, (3) circular
 // value is only used in "constant"
 // only "constant" with 0.0f and "replicate" are implemented here
@@ -60,6 +73,43 @@ static ggml_tensor * ggml_pad_ext(ggml_context * ctx0, ggml_tensor * x, int mode
     }
     return x;
 }
+
+static ggml_tensor * ggml_argmin(ggml_context * ctx0, ggml_tensor * x) {
+    ggml_tensor * tmp = ggml_scale(ctx0, x, -1.0f);
+    return ggml_argmax(ctx0, tmp);
+}
+
+// lookup nearest vector in codebook based on euclidean distance
+// return index of the vector in codebook, single element with I32 type
+static ggml_tensor * ggml_lookup_vec(ggml_context * ctx0, ggml_tensor * codebook, ggml_tensor * x) {
+    ggml_tensor * tmp = ggml_add(ctx0, codebook, ggml_scale(ctx0, x, -1.0f)); // a - x
+    tmp = ggml_mul(ctx0, tmp, tmp); // (a - x) ** 2
+    tmp = ggml_sum_rows(ctx0, tmp);
+    tmp = ggml_sqrt(ctx0, tmp);
+    tmp = ggml_cont(ctx0, ggml_transpose(ctx0, tmp));
+    // villain version of argmin :-)
+    tmp = ggml_argmax(ctx0, ggml_scale(ctx0, tmp, -1.0f));
+    GGML_ASSERT(ggml_nelements(tmp) == 1);
+    return tmp;
+}
+
+// lookup vectors in codebook based on euclidean distance
+// return indices of the vectors in codebook, 1D tensor with I32 type
+static ggml_tensor * ggml_lookup_vectors(ggml_easy::ctx::build_utils & utils, ggml_context * ctx0, ggml_tensor * codebook, ggml_tensor * list_vec, ggml_tensor * out, size_t offset) {
+    int64_t n_col = list_vec->ne[0];
+    int64_t n_row = list_vec->ne[1];
+    for (int64_t ir = 0; ir < n_row; ir++) {
+        ggml_tensor * row = ggml_view_1d(ctx0, list_vec, n_col, ir*n_col*ggml_element_size(list_vec));
+        ggml_tensor * idx = ggml_lookup_vec(ctx0, codebook, row);
+        ggml_tensor * dst = ggml_view_1d(ctx0, out, 1, offset + ir*ggml_element_size(out));
+        ggml_build_forward_expand(utils.gf, ggml_cpy(ctx0, idx, dst));
+    }
+    return out;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+
 
 static int64_t div_ceil(int64_t a, int64_t b) {
     return a / b + (a % b ? 1 : 0);
@@ -227,8 +277,6 @@ struct mimi_transformer {
             return ggml_reshape_2d(ctx0, tmp, w->ne[0], w->ne[1]);
         };
 
-        ggml_easy::debug::print_tensor_shape(input);
-
         ggml_tensor * residual = input;
 
         int i = 0; // for debugging
@@ -303,6 +351,83 @@ struct mimi_transformer {
     }
 };
 
+struct mimi_residual_vector_quantizer {
+    struct component {
+        ggml_tensor * codebook_embed_sum;
+        ggml_tensor * codebook_cluster_usage;
+        ggml_tensor * get_embd(ggml_context * ctx0) {
+            // TODO: do this at conversion time
+            ggml_tensor * tmp = ggml_cont(ctx0, ggml_transpose(ctx0, codebook_cluster_usage));
+            tmp = ggml_clamp(ctx0, tmp, mimi_config.norm_eps, FLT_MAX);
+            return ggml_div(ctx0, codebook_embed_sum, tmp);
+        }
+    };
+
+    ggml_tensor * semantic_inp_proj;
+    std::vector<component> semantic_components;
+    ggml_tensor * semantic_out_proj;
+
+    ggml_tensor * acoustic_inp_proj;
+    std::vector<component> acoustic_components;
+    ggml_tensor * acoustic_out_proj;
+
+    mimi_residual_vector_quantizer(ggml_easy::ctx & ctx) {
+        semantic_inp_proj = ctx.get_weight("quantizer.semantic_rvq.input_proj.weight");
+        semantic_out_proj = ctx.get_weight("quantizer.semantic_rvq.output_proj.weight");
+        for (int i = 0; i < mimi_config.n_semantic_components; i++) {
+            semantic_components.push_back({
+                .codebook_embed_sum     = ctx.get_weight("quantizer.semantic_rvq.layers.%d.codebook.embed_sum",     i),
+                .codebook_cluster_usage = ctx.get_weight("quantizer.semantic_rvq.layers.%d.codebook.cluster_usage", i),
+            });
+        }
+        acoustic_inp_proj = ctx.get_weight("quantizer.acoustic_rvq.input_proj.weight");
+        acoustic_out_proj = ctx.get_weight("quantizer.acoustic_rvq.output_proj.weight");
+        for (int i = 0; i < mimi_config.n_acoustic_components; i++) {
+            acoustic_components.push_back({
+                .codebook_embed_sum     = ctx.get_weight("quantizer.acoustic_rvq.layers.%d.codebook.embed_sum",     i),
+                .codebook_cluster_usage = ctx.get_weight("quantizer.acoustic_rvq.layers.%d.codebook.cluster_usage", i),
+            });
+        }
+    }
+
+    ggml_tensor * encode(ggml_context * ctx0, ggml_easy::ctx::build_utils & utils, ggml_tensor * input) {
+        int64_t n_embd           = input->ne[1];
+        int64_t n_codes_per_embd = (semantic_components.size() + acoustic_components.size());
+        ggml_tensor * codes = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, n_embd, n_codes_per_embd);
+        ggml_set_input(codes);
+        ggml_set_name(codes, "codes");
+
+        size_t pos = 0;
+        {
+            // semantic
+            ggml_tensor * proj = ggml_reshape_2d(ctx0, semantic_inp_proj,
+                semantic_inp_proj->ne[1], semantic_inp_proj->ne[2]); // TODO: do this at conversion time
+            ggml_tensor * x = ggml_mul_mat(ctx0, proj, input);
+            for (size_t i = 0; i < semantic_components.size(); i++) {
+                ggml_tensor * codebook = semantic_components[i].get_embd(ctx0);
+                codes = ggml_lookup_vectors(utils, ctx0, codebook, x, codes, pos);
+                ggml_build_forward_expand(utils.gf, codes);
+                pos += n_embd*ggml_element_size(codes);
+            }
+        }
+
+        {
+            // acoustic
+            ggml_tensor * proj = ggml_reshape_2d(ctx0, acoustic_inp_proj,
+                acoustic_inp_proj->ne[1], acoustic_inp_proj->ne[2]); // TODO: do this at conversion time
+            ggml_tensor * x = ggml_mul_mat(ctx0, proj, input);
+            for (size_t i = 0; i < acoustic_components.size(); i++) {
+                ggml_tensor * codebook = acoustic_components[i].get_embd(ctx0);
+                codes = ggml_lookup_vectors(utils, ctx0, codebook, x, codes, pos);
+                ggml_build_forward_expand(utils.gf, codes);
+                pos += n_embd*ggml_element_size(codes);
+            }
+        }
+
+        return codes;
+    }
+};
+
 int main() {
     ggml_easy::ctx_params params;
     //params.log_level = GGML_LOG_LEVEL_DEBUG;
@@ -313,8 +438,9 @@ int main() {
     // optional: print backend buffer info
     ggml_easy::debug::print_backend_buffer_info(ctx);
 
-    mimi_encoder     encoder(ctx);
-    mimi_transformer encoder_transformer(ctx, "encoder", 8);
+    mimi_encoder                   encoder(ctx);
+    mimi_transformer               encoder_transformer(ctx, "encoder", 8);
+    mimi_residual_vector_quantizer quantizer(ctx);
 
     // create cgraph
     int n_pos = -1;
@@ -336,7 +462,11 @@ int main() {
         embeddings = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, embeddings));
         embeddings = mimi_conv_1d(utils, ctx_gf, embeddings, ctx.get_weight("downsample.conv.weight"), nullptr, 2, 1, false);
 
-        utils.debug_print(embeddings, "output");
+        // residual vector quantizer
+        embeddings = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, embeddings));
+        embeddings = quantizer.encode(ctx_gf, utils, embeddings);
+
+        utils.debug_print_full(embeddings, "output");
         utils.mark_output(embeddings, "output");
     });
 

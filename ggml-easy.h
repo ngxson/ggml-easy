@@ -12,6 +12,7 @@
 #include "ggml-backend.h"
 #include "gguf.h"
 
+#include <limits.h>
 #include <vector>
 #include <cinttypes>
 #include <fstream>
@@ -63,7 +64,12 @@ struct ctx {
     ggml_context * ctx_gf   = nullptr;
 
     std::unordered_map<std::string, ggml_tensor *> tensors;
-    std::vector<ggml_tensor *> dbg_printed_tensors;
+
+    struct printed_tensor {
+        ggml_tensor * t;
+        bool full;
+    };
+    std::vector<printed_tensor> dbg_printed_tensors;
 
     ggml_cgraph * gf = nullptr;
     std::vector<uint8_t> buf_compute_meta;
@@ -196,7 +202,7 @@ struct ctx {
     struct build_utils {
         ggml_context * gf_ctx;
         ggml_cgraph  * gf;
-        std::vector<ggml_tensor *> printed_tensors;
+        std::vector<printed_tensor> printed_tensors;
         build_utils(ggml_context * gf_ctx, ggml_cgraph * gf) : gf_ctx(gf_ctx), gf(gf) {}
         /**
          * Add an input tensor, this function does these steps:
@@ -229,7 +235,16 @@ struct ctx {
         void debug_print(ggml_tensor * t, Params&&... params) {
             std::string name = string_format(std::forward<Params>(params)...);
             mark_output(t, name.c_str());
-            printed_tensors.push_back(t);
+            printed_tensors.push_back({t, false});
+        }
+        /**
+         * Same with `debug_print` but also print the full tensor shape and data.
+         */
+        template <typename ...Params>
+        void debug_print_full(ggml_tensor * t, Params&&... params) {
+            std::string name = string_format(std::forward<Params>(params)...);
+            mark_output(t, name.c_str());
+            printed_tensors.push_back({t, true});
         }
     };
 
@@ -272,11 +287,11 @@ struct ctx {
     ggml_status compute() {
         ggml_status status = ggml_backend_sched_graph_compute(sched.get(), gf);
         if (status == GGML_STATUS_SUCCESS) {
-            for (ggml_tensor * t : dbg_printed_tensors) {
-                std::vector<uint8_t> data(ggml_nbytes(t));
-                ggml_backend_tensor_get(t, data.data(), 0, ggml_nbytes(t));
-                ggml_easy::debug::print_tensor_shape(t);
-                ggml_easy::debug::print_tensor_data(t, data.data());
+            for (auto & p : dbg_printed_tensors) {
+                std::vector<uint8_t> data(ggml_nbytes(p.t));
+                ggml_backend_tensor_get(p.t, data.data(), 0, ggml_nbytes(p.t));
+                ggml_easy::debug::print_tensor_shape(p.t);
+                ggml_easy::debug::print_tensor_data(p.t, data.data(), p.full ? LONG_MAX : 3);
             }
         }
         return status;
