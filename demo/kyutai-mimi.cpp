@@ -5,13 +5,41 @@
 
 
 /**
- * This is WIP, currently only for logits matching
+ * (Stil WIP) This is my trial to reimplement the Mimi model from Kyutai using ggml, the code is based on HF transformers implementation. See "modeling_mimi.py" for the original code.
  * 
  * To get the gguf:
  * 1. Download the model.safetensors file from https://huggingface.co/kyutai/mimi
  * 2. Run: python convert_safetensors_to_gguf.py --outtype f32 model.safetensors mimi.gguf
  * 
  * Note: do NOT upload the gguf to the internet, it is NOT compatible with llama.cpp and people will complain.
+ * 
+ * ---
+ * 
+ * For the ENCODER, it takes raw audio waveform as input and output audio codes. Steps are:
+ * 1. Convert waveform to embeddings using mimi_encoder (SEANet encoder), basically just a bunch of Conv1d but the padding is quite tricky.
+ * 2. Process the embeddings using a transformer, here we use an auto-aggressive one (causal mask). This is because Laurent told me that they only trained the model with auto-regressive setting.
+ * 3. Quantize the embeddings using a residual vector quantizer (RVQ) to get the audio codes. The RVQ has 32 codebooks, one for semantic and 31 for acoustic. Doing this on ggml is a bit tricky because I need to reimplement euclidean distance from scratch.
+ * 
+ * In the code below, we take 2048 samples of audio waveform as input (value = 1.0f), expected output is 2 tokens (according to python implementation).
+ * 
+ * Python code:
+ *   model = MimiModel.from_pretrained("/Users/ngxson/work/models/mimi")
+ *   input_values = torch.ones((1, 1, 2048))
+ *   encoder_outputs = model.encode(input_values)  # this should match the output of ggml
+ * 
+ * ---
+ * 
+ * For the DECODER, we simply do the reverse of the above steps.
+ * The good thing is that this time, we don't need to care about euclidean distance.
+ * 
+ * Python code:
+ *   model = MimiModel.from_pretrained("/Users/ngxson/work/models/mimi")
+ *   input_values = torch.tensor([[ [i, i+1, i+2] for i in range(0, 3*32, 3) ]], dtype=torch.long)
+ *   audio_values = model.decode(input_values)[0]  # this should match the output of ggml
+ *
+ *   Expected output:
+ *     torch.Size([1, 1, 5760]) 
+ *     tensor([[[ 0.0117,  0.0130, -0.0007,  ..., -0.1295, -0.1258, -0.1343]]])
  */
 
 struct mimi_config_t {
@@ -32,9 +60,11 @@ struct mimi_config_t {
     float frame_rate = 12.5;
     int audio_channels = 1;
     int codebook_size = 2048;
-    int codebook_dim = 512;
+    int codebook_dim = 256;
     int n_semantic_components = 1;
     int n_acoustic_components = 31;
+    // decode
+    float trim_right_ratio = 1.0f;
 } mimi_config;
 
 
@@ -142,12 +172,68 @@ static ggml_tensor * mimi_conv_1d(ggml_easy::ctx::build_utils & utils, ggml_cont
     return x;
 };
 
+static ggml_tensor * mimi_conv_transpose_1d(ggml_easy::ctx::build_utils & utils, ggml_context * ctx0, ggml_tensor * x,
+        ggml_tensor * kernel, ggml_tensor * bias, int stride, int dilation, bool depthwise) {
+    GGML_ASSERT(x->ne[1] == kernel->ne[2]);
+    int64_t n_rows = x->ne[1];
+    int64_t kernel_size = kernel->ne[0];
+    int64_t p_total = kernel_size - stride; // padding total
+
+    int64_t p_right = mimi_config.causal
+        ? (float)p_total / mimi_config.trim_right_ratio
+        : p_total / 2;
+    int64_t p_left = p_total - p_right;
+
+    ggml_tensor * out = nullptr;
+
+    kernel = ggml_cast(ctx0, kernel, GGML_TYPE_F16); // TODO: do this at conversion time
+
+    if (depthwise) {
+        for (int64_t ir = 0; ir < n_rows; ir++) {
+            ggml_tensor * row = ggml_view_1d(ctx0, x,
+                                            x->ne[0], ir*x->ne[0]*ggml_element_size(x));
+            ggml_tensor * krn = ggml_view_1d(ctx0, kernel,
+                                            kernel->ne[0], ir*kernel->ne[0]*ggml_element_size(kernel));
+            if (ir == 0) {
+                ggml_set_name(krn, "krn");
+                ggml_easy::debug::print_tensor_shape(krn);
+            }
+            row = ggml_conv_transpose_1d(ctx0, krn, row, stride, 0, dilation);
+            if (ir == 0) {
+                ggml_set_name(row, "ggml_conv_transpose_1d __________");
+                ggml_easy::debug::print_tensor_shape(row);
+            }
+            // unpad (remove p_right and p_left columns)
+            row = ggml_view_1d(ctx0, row, row->ne[0] - p_total, p_left*ggml_element_size(row));
+    
+            // TODO: concat can be slow, we should use ggml_view_1d/ggml_cpy to avoid realloc
+            out = out ? ggml_concat(ctx0, out, row, 1) : row;
+        }
+
+    } else {
+        out = ggml_conv_transpose_1d(ctx0, kernel, x, stride, 0, dilation);
+        // unpad
+        out = ggml_view_2d(ctx0, out,
+            out->ne[0] - p_total, out->ne[1],
+            out->nb[1], p_left*ggml_element_size(out));
+    }
+
+    if (bias) {
+        bias = ggml_cont(ctx0, ggml_transpose(ctx0, bias)); // TODO: do this at conversion time
+        out = ggml_add(ctx0, out, bias);
+    }
+
+    return out;
+}
+
 // based on MimiEncoder
 // SEANet encoder as used by Mimi.
-struct mimi_encoder {
+struct mimi_encoder_decoder {
+    ggml_easy::ctx & ctx;
     struct layer {
         bool is_elu = false;
         bool is_resnet = false;
+        bool is_transposed_conv = false;
         ggml_tensor * conv_0_w;
         ggml_tensor * conv_0_b;
         ggml_tensor * conv_1_w;
@@ -157,14 +243,16 @@ struct mimi_encoder {
     int dilation_growth_rate = 2; // TODO: unused?
     std::vector<layer> layers;
 
-    mimi_encoder(ggml_easy::ctx & ctx) {
-        std::array<int, 4> repeated_pattern = {1, 4, 7, 10};
+    std::array<int, 4> repeated_pattern = {1, 4, 7, 10};
 
+    mimi_encoder_decoder(ggml_easy::ctx & ctx) : ctx(ctx) {}
+
+    void load_encoder() {
         layers.push_back({
             .conv_0_w = ctx.get_weight("encoder.layers.0.conv.weight"),
             .conv_0_b = ctx.get_weight("encoder.layers.0.conv.bias"),
         });
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < (int)repeated_pattern.size(); ++i) {
             int i_start = repeated_pattern[i];
             // residual layers
             layers.push_back({
@@ -193,6 +281,41 @@ struct mimi_encoder {
         });
     }
 
+    void load_decoder() {
+        layers.push_back({
+            .conv_0_w = ctx.get_weight("decoder.layers.0.conv.weight"),
+            .conv_0_b = ctx.get_weight("decoder.layers.0.conv.bias"),
+        });
+        for (int i = 0; i < (int)repeated_pattern.size(); ++i) {
+            int i_start = repeated_pattern[i];
+            // upsampling layers
+            layers.push_back({
+                .is_elu = true, // layer (i_start)
+            });
+            layers.push_back({
+                .conv_0_w = ctx.get_weight("decoder.layers.%d.conv.weight", i_start + 1),
+                .conv_0_b = ctx.get_weight("decoder.layers.%d.conv.bias",   i_start + 1),
+                .stride = mimi_config.upsampling_ratio[i],
+                .is_transposed_conv = true,
+            });
+            // residual layers
+            layers.push_back({
+                .is_resnet = true,
+                .conv_0_w = ctx.get_weight("decoder.layers.%d.block.1.conv.weight", i_start + 2),
+                .conv_0_b = ctx.get_weight("decoder.layers.%d.block.1.conv.bias",   i_start + 2),
+                .conv_1_w = ctx.get_weight("decoder.layers.%d.block.3.conv.weight", i_start + 2),
+                .conv_1_b = ctx.get_weight("decoder.layers.%d.block.3.conv.bias",   i_start + 2),
+            });
+        }
+        layers.push_back({
+            .is_elu = true, // layer 13
+        });
+        layers.push_back({
+            .conv_0_w = ctx.get_weight("decoder.layers.14.conv.weight"),
+            .conv_0_b = ctx.get_weight("decoder.layers.14.conv.bias"),
+        });
+    }
+
     ggml_tensor * forward(ggml_context * ctx0, ggml_easy::ctx::build_utils & utils, ggml_tensor * input) {
         ggml_tensor * x = input;
 
@@ -203,12 +326,16 @@ struct mimi_encoder {
             } else if (layer.is_resnet) {
                 ggml_tensor * residual = x;
                 x = ggml_elu(ctx0, x);
+                ggml_easy::debug::print_tensor_shape(x);
+                ggml_easy::debug::print_tensor_shape(layer.conv_0_w);
                 x = mimi_conv_1d(utils, ctx0, x, layer.conv_0_w, layer.conv_0_b, 1, 1);
                 x = ggml_elu(ctx0, x);
                 x = mimi_conv_1d(utils, ctx0, x, layer.conv_1_w, layer.conv_1_b, 1, 1);
                 x = ggml_add(ctx0, x, residual);
             } else {
-                x = mimi_conv_1d(utils, ctx0, x, layer.conv_0_w, layer.conv_0_b, layer.stride, 1);
+                x = layer.is_transposed_conv
+                    ? mimi_conv_transpose_1d(utils, ctx0, x, layer.conv_0_w, layer.conv_0_b, layer.stride, 1, false)
+                    : mimi_conv_1d(utils, ctx0, x, layer.conv_0_w, layer.conv_0_b, layer.stride, 1);
             }
             // utils.debug_print(x, "after_layer_%d", i); i++;
         }
@@ -390,6 +517,7 @@ struct mimi_residual_vector_quantizer {
         }
     }
 
+    // 🆘🆘🆘🆘🆘 FIXME: this does not work correcly, about 50% of the output codes are incorrect
     ggml_tensor * encode(ggml_context * ctx0, ggml_easy::ctx::build_utils & utils, ggml_tensor * input) {
         int64_t n_embd           = input->ne[1];
         int64_t n_codes_per_embd = (semantic_components.size() + acoustic_components.size());
@@ -426,11 +554,56 @@ struct mimi_residual_vector_quantizer {
 
         return codes;
     }
+
+    // the input has shape [n_codes, n_codes_per_embd]
+    // first row is semantic, the rest are acoustic
+    // example: [ [semantic], [acoustic1], [acoustic2], ... ]
+    ggml_tensor * decode(ggml_context * ctx0, ggml_easy::ctx::build_utils & utils, ggml_tensor * input) {
+        GGML_ASSERT(input->type == GGML_TYPE_I32);
+
+        size_t  n_semantic       = semantic_components.size();
+        int64_t n_codes_per_embd = (n_semantic + acoustic_components.size());
+        int64_t n_codes          = input->ne[0] / n_codes_per_embd;
+        
+        GGML_ASSERT(input->ne[0] % n_codes_per_embd == 0);
+
+        ggml_tensor * out_s = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, mimi_config.codebook_dim, n_codes);
+        ggml_tensor * out_a = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, mimi_config.codebook_dim, n_codes);
+        out_s = ggml_scale(ctx0, out_s, 0.0f); // clear
+        out_a = ggml_scale(ctx0, out_a, 0.0f); // clear
+
+        for (size_t ir = 0; ir < n_codes_per_embd; ir++) {
+            ggml_tensor * row = ggml_view_1d(ctx0, input, n_codes, ir*n_codes*ggml_element_size(input));
+            if (ir < n_semantic) {
+                // semantic
+                ggml_tensor * codebook = semantic_components[ir].get_embd(ctx0);
+                ggml_tensor * embd = ggml_get_rows(ctx0, codebook, row);
+                out_s = ggml_add(ctx0, out_s, embd);
+            } else {
+                // acoustic
+                ggml_tensor * codebook = acoustic_components[ir-n_semantic].get_embd(ctx0);
+                ggml_tensor * embd = ggml_get_rows(ctx0, codebook, row);
+                out_a = ggml_add(ctx0, out_a, embd);
+            }
+        }
+
+        ggml_tensor * proj_s = ggml_reshape_2d(ctx0, semantic_out_proj,
+            semantic_out_proj->ne[1], semantic_out_proj->ne[2]); // TODO: do this at conversion time
+        ggml_tensor * proj_a = ggml_reshape_2d(ctx0, acoustic_out_proj,
+            acoustic_out_proj->ne[1], acoustic_out_proj->ne[2]); // TODO: do this at conversion time
+
+        out_s = ggml_mul_mat(ctx0, proj_s, out_s);
+        out_a = ggml_mul_mat(ctx0, proj_a, out_a);
+
+        return ggml_add(ctx0, out_s, out_a);
+    }
 };
 
 int main() {
     ggml_easy::ctx_params params;
     //params.log_level = GGML_LOG_LEVEL_DEBUG;
+    params.max_nodes = 1024*16;
+    params.use_gpu = false;
     ggml_easy::ctx ctx(params);
 
     ctx.load_gguf("mimi.gguf");
@@ -438,46 +611,88 @@ int main() {
     // optional: print backend buffer info
     ggml_easy::debug::print_backend_buffer_info(ctx);
 
-    mimi_encoder                   encoder(ctx);
+    mimi_encoder_decoder           encoder(ctx);
+    mimi_encoder_decoder           decoder(ctx);
     mimi_transformer               encoder_transformer(ctx, "encoder", 8);
+    mimi_transformer               decoder_transformer(ctx, "decoder", 8);
     mimi_residual_vector_quantizer quantizer(ctx);
 
+    encoder.load_encoder();
+    decoder.load_decoder();
+
     // create cgraph
-    int n_pos = -1;
     ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf, auto & utils) {
         ggml_tensor * input = utils.new_input("input", GGML_TYPE_F32, 2048);
 
-        // SEANET encoder
-        ggml_tensor * embeddings = encoder.forward(ctx_gf, utils, input);
-        utils.debug_print(embeddings, "embeddings");
+        // encoder
+        {
+            // SEANET encoder
+            ggml_tensor * embeddings = encoder.forward(ctx_gf, utils, input);
+            utils.debug_print(embeddings, "embeddings");
 
-        // transformer
-        n_pos = embeddings->ne[0];
-        ggml_tensor * inp_pos = utils.new_input("positions", GGML_TYPE_I32, n_pos);
-        embeddings = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, embeddings));
-        embeddings = encoder_transformer.forward(ctx_gf, utils, embeddings, inp_pos);
-        utils.debug_print(embeddings, "embeddings_after_transformer");
+            // transformer
+            int n_pos = embeddings->ne[0];
+            ggml_tensor * pos_enc = utils.new_input("pos_enc", GGML_TYPE_I32, n_pos);
+            embeddings = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, embeddings));
+            embeddings = encoder_transformer.forward(ctx_gf, utils, embeddings, pos_enc);
+            utils.debug_print(embeddings, "embeddings_after_transformer");
 
-        // downsample
-        embeddings = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, embeddings));
-        embeddings = mimi_conv_1d(utils, ctx_gf, embeddings, ctx.get_weight("downsample.conv.weight"), nullptr, 2, 1, false);
+            // downsample
+            embeddings = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, embeddings));
+            embeddings = mimi_conv_1d(utils, ctx_gf, embeddings, ctx.get_weight("downsample.conv.weight"), nullptr, 2, 1, false);
+            utils.debug_print(embeddings, "downsample");
 
-        // residual vector quantizer
-        embeddings = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, embeddings));
-        embeddings = quantizer.encode(ctx_gf, utils, embeddings);
+            // residual vector quantizer
+            embeddings = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, embeddings));
+            embeddings = quantizer.encode(ctx_gf, utils, embeddings);
 
-        utils.debug_print_full(embeddings, "output");
-        utils.mark_output(embeddings, "output");
+            //utils.debug_print_full(embeddings, "output_codes");
+            utils.mark_output(embeddings, "output_codes");
+        }
+
+        // decoder
+        {
+            ggml_tensor * inp_dec = utils.new_input("inp_dec", GGML_TYPE_I32, 3 * 32);
+            ggml_tensor * embeddings = quantizer.decode(ctx_gf, utils, inp_dec);
+            utils.debug_print(embeddings, "read from codebook");
+
+            // upsample
+            embeddings = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, embeddings));
+            embeddings = mimi_conv_transpose_1d(utils, ctx_gf, embeddings, ctx.get_weight("upsample.conv.weight"), nullptr, 2, 1, true);
+            utils.debug_print(embeddings, "upscaled");
+
+            // transformer
+            int n_pos = embeddings->ne[0];
+            ggml_tensor * pos_dec = utils.new_input("pos_dec", GGML_TYPE_I32, n_pos);
+            embeddings = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, embeddings));
+            embeddings = decoder_transformer.forward(ctx_gf, utils, embeddings, pos_dec);
+            utils.debug_print(embeddings, "embeddings_after_transformer");
+
+            // SEANET decoder
+            embeddings = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, embeddings));
+            ggml_tensor * output = decoder.forward(ctx_gf, utils, embeddings);
+            utils.debug_print(output, "output decoded");
+        }
     });
 
+    // equivalent to python code: torch.ones((1, 1, 2048))
     ctx.set_tensor_data("input", [](int, int, int, int) { return 1.0f; });
 
     // position data
-    std::vector<int> pos_data(n_pos);
-    for (int i = 0; i < n_pos; i++) {
+    std::vector<int> pos_data(1024);
+    for (int i = 0; i < (int)pos_data.size(); i++) {
         pos_data[i] = i;
     }
-    ctx.set_tensor_data("positions", pos_data.data());
+    ctx.set_tensor_data("pos_enc", pos_data.data());
+    ctx.set_tensor_data("pos_dec", pos_data.data());
+
+    // inp_dec data
+    // equivalent to python code: torch.tensor([[ [i, i+1, i+2] for i in range(0, 3*32, 3) ]], dtype=torch.long)
+    std::vector<int> inp_dec(3 * 32);
+    for (size_t i = 0; i < inp_dec.size(); i++) {
+        inp_dec[i] = i;
+    }
+    ctx.set_tensor_data("inp_dec", inp_dec.data());
 
     ctx.compute();
 
