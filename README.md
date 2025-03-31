@@ -56,7 +56,7 @@ You can directly load `.safetensors` file to `ggml-easy` without having to conve
 ```cpp
 ggml_easy::ctx_params params;
 ggml_easy::ctx ctx(params);
-ctx0.load_safetensors("mimi.safetensors", {
+ctx.load_safetensors("mimi.safetensors", {
     // optionally, rename tensor to make it shorter (name length limit in ggml is 64 characters)
     {".acoustic_residual_vector_quantizer", ".acoustic_rvq"},
     {".semantic_residual_vector_quantizer", ".semantic_rvq"},
