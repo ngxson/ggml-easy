@@ -63,6 +63,10 @@ ctx.load_safetensors("mimi.safetensors", {
 });
 ```
 
+For a complete example, please have a look on [demo/safetensors.cpp](demo/safetensors.cpp) where I load both GGUF + safetensors files, then compare them.
+
+TODO: multi-shards are not supported for now, will add it soon!
+
 ### Define input, output easily
 
 When building computation graph, each input and output nodes can be added with single line of code:
