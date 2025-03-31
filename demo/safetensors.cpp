@@ -3,13 +3,21 @@
 #include <iostream>
 
 /**
- * This example demonstrates how to load safetensors directly to GGML without any conversion.
+ * This example demonstrates how to load safetensors directly to GGML without any conversions.
+ * 
+ * We load both the GGUF and safetensors of the same model, then compare the tensors.
+ * All tensors are expected to be equal.
+ * 
+ * I'm using https://huggingface.co/kyutai/mimi as the model. But you can use any model.
+ * 
+ * To get the safetensors:
+ * 1. Download the model.safetensors file
+ * 2. Rename the "model.safetensors" to "mimi.safetensors"
  * 
  * To get the gguf:
- * 1. Download the model.safetensors file from https://huggingface.co/kyutai/mimi
+ * 1. Download the model.safetensors file
  * 2. Run: python convert_safetensors_to_gguf.py --outtype f32 model.safetensors mimi.gguf
  * 
- * Rename the "model.safetensors" to "mimi.safetensors" in order to run this example.
  */
 
 int main() {
