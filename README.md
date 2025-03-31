@@ -49,6 +49,20 @@ ggml_easy::ctx ctx(params);
 
 Please note that the GPU support is for convenience and is not aimed to have the best performance. Some operations will fallback to CPU if the GPU does not support them.
 
+### Load safetensors without converting to GGUF
+
+You can directly load `.safetensors` file to `ggml-easy` without having to convert it to GGUF! Currently, F32, F16 and BF16 types are supported.
+
+```cpp
+ggml_easy::ctx_params params;
+ggml_easy::ctx ctx(params);
+ctx0.load_safetensors("mimi.safetensors", {
+    // optionally, rename tensor to make it shorter (name length limit in ggml is 64 characters)
+    {".acoustic_residual_vector_quantizer", ".acoustic_rvq"},
+    {".semantic_residual_vector_quantizer", ".semantic_rvq"},
+});
+```
+
 ### Define input, output easily
 
 When building computation graph, each input and output nodes can be added with single line of code:

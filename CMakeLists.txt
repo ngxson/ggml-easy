@@ -6,24 +6,16 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 add_subdirectory(ggml)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
-
 # demo
-set(TARGET basic)
-add_executable(${TARGET} demo/basic.cpp)
-target_link_libraries(${TARGET} PRIVATE ggml)
-target_compile_features(${TARGET} PRIVATE cxx_std_17)
+set(DEMO_TARGETS
+    basic
+    dyt-rms
+    svd
+    kyutai-mimi
+    safetensors)
 
-set(TARGET dyt-rms)
-add_executable(${TARGET} demo/dyt-rms.cpp)
-target_link_libraries(${TARGET} PRIVATE ggml)
-target_compile_features(${TARGET} PRIVATE cxx_std_17)
-
-set(TARGET svd)
-add_executable(${TARGET} demo/svd.cpp)
-target_link_libraries(${TARGET} PRIVATE ggml)
-target_compile_features(${TARGET} PRIVATE cxx_std_17)
-
-set(TARGET kyutai-mimi)
-add_executable(${TARGET} demo/kyutai-mimi.cpp)
-target_link_libraries(${TARGET} PRIVATE ggml)
-target_compile_features(${TARGET} PRIVATE cxx_std_17)
+foreach(TARGET ${DEMO_TARGETS})
+  add_executable(${TARGET} demo/${TARGET}.cpp)
+  target_link_libraries(${TARGET} PRIVATE ggml)
+  target_compile_features(${TARGET} PRIVATE cxx_std_17)
+endforeach()

@@ -14,6 +14,7 @@
 
 #include <limits.h>
 #include <vector>
+#include <map>
 #include <cinttypes>
 #include <fstream>
 #include <functional>
@@ -42,20 +43,34 @@ namespace debug {
     static void print_tensor_data(ggml_tensor * t, uint8_t * data, int64_t n = 3);
 }
 
-std::string string_format(const char * fmt, ...) {
-    va_list ap;
-    va_list ap2;
-    va_start(ap, fmt);
-    va_copy(ap2, ap);
-    int size = vsnprintf(NULL, 0, fmt, ap);
-    GGML_ASSERT(size >= 0 && size < INT_MAX); // NOLINT
-    std::vector<char> buf(size + 1);
-    int size2 = vsnprintf(buf.data(), size + 1, fmt, ap2);
-    GGML_ASSERT(size2 == size);
-    va_end(ap2);
-    va_end(ap);
-    return std::string(buf.data(), size);
-}
+// forward declaration for safetensors (lightweight) JSON parser
+struct safetensors_json_parser {
+    static const int alignment = 32; // bytes
+    enum state {
+        STATE_ROOT,
+        STATE_OBJ_METADATA,
+        STATE_OBJ_TENSOR,
+    };
+    struct tensor {
+        std::string name;
+        ggml_type type = GGML_TYPE_F32; // only F32, F16, BF16 are supported
+        std::array<int64_t, 4> shape = {0, 1, 1, 1}; // row-major order
+        uint64_t offset = 0;
+        void print() {
+            printf("tensor: %-60s, type: %s, shape: [%4" PRId64 ", %4" PRId64 ", %4" PRId64 ", %4" PRId64 "], offset: %" PRIu64 "\n",
+                name.c_str(), ggml_type_name(type), shape[0], shape[1], shape[2], shape[3], offset);
+        }
+    };
+    std::vector<tensor> tensors;
+    size_t metadata_size = 0;
+    safetensors_json_parser(const char * json, size_t metadata_size, std::map<std::string, std::string> name_replace_map);
+    uint64_t get_data_offset();
+};
+
+std::string string_format(const char * fmt, ...);
+void string_replace_all(std::string & s, const std::string & search, const std::string & replace);
+
+////////////////////////////////////////
 
 struct ctx {
     ggml_log_level log_level;
@@ -114,12 +129,19 @@ struct ctx {
         buf_compute_meta.resize(max_nodes * ggml_tensor_overhead() + ggml_graph_overhead());
     }
 
-    template <typename ...Params>
-    ggml_tensor * get_weight(Params&&... params) {
-        std::string name = string_format(std::forward<Params>(params)...);
-        auto it = tensors.find(name);
+    /**
+     * Get a weight tensor by name, can only be used after model is loaded.
+     * Throws an exception if the tensor is not found.
+     */
+    ggml_tensor * get_weight(const char *fmt, ...) {
+        std::vector<char> str(128);
+        va_list va;
+        va_start(va, fmt);
+        vsnprintf(str.data(), 128, fmt, va);
+        va_end(va);
+        auto it = tensors.find(str.data());
         if (it == tensors.end()) {
-            throw std::runtime_error(string_format("weight tensor not found: %s", name.c_str()));
+            throw std::runtime_error(string_format("weight tensor not found: %s", str.data()));
         }
         return it->second;
     }
@@ -129,9 +151,6 @@ struct ctx {
      * The tensors will be loaded into the context and can be accessed via `ctx.get_weight(name)`
      * The GGUF metadata will be loaded into `ctx.ctx_gguf`
      */
-    void load_gguf(std::string & fname) {
-        load_gguf(fname.c_str());
-    }
     void load_gguf(const char * fname) {
         ggml_context * meta = nullptr;
 
@@ -144,8 +163,6 @@ struct ctx {
 
         // load tensors
         const int n_tensors = gguf_get_n_tensors(ctx_gguf);
-
-        std::vector<uint8_t> read_buf;
         ggml_init_params ggml_params = {
             /*.mem_size   =*/ (n_tensors + 1) * ggml_tensor_overhead(),
             /*.mem_buffer =*/ NULL,
@@ -169,36 +186,71 @@ struct ctx {
         }
 
         // alloc memory and offload data
-        ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
-        buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx_data, buft);
-        ggml_backend_buffer_set_usage(buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
-        for (int i = 0; i < n_tensors; ++i) {
-            const char * name = gguf_get_tensor_name(ctx_gguf, i);
-            ggml_tensor * cur = ggml_get_tensor(ctx_data, name);
-            const size_t offset = gguf_get_data_offset(ctx_gguf) + gguf_get_tensor_offset(ctx_gguf, i);
-            log(GGML_LOG_LEVEL_DEBUG, "%s: Loading tensor \"%s\"\n", __func__, name);
-            fin.seekg(offset, std::ios::beg);
-            if (!fin) {
-                ggml_free(meta);
-                throw std::runtime_error(string_format("failed to seek for tensor: %s", name));
-            }
-            int num_bytes = ggml_nbytes(cur);
-            if (ggml_backend_buft_is_host(buft)) {
-                // for the CPU and Metal backend, we can read directly into the tensor
-                fin.read(reinterpret_cast<char *>(cur->data), num_bytes);
-            } else {
-                // read into a temporary buffer first, then copy to device memory
-                read_buf.resize(num_bytes);
-                fin.read(reinterpret_cast<char *>(read_buf.data()), num_bytes);
-                ggml_backend_tensor_set(cur, read_buf.data(), 0, num_bytes);
-            }
+        std::map<ggml_tensor *, uint64_t> offset_map; // empty map, use default value
+        if (!load_tensors_to_backend(fin, offset_map)) {
+            ggml_free(meta);
+            throw std::runtime_error("failed to load tensors to backend");
         }
         log(GGML_LOG_LEVEL_INFO, "%s: Loaded %d tensors from %s\n", __func__, n_tensors, fname);
-        fin.close();
-
         ggml_free(meta);
     }
 
+    /**
+     * Load a Safetensors model file
+     * The tensors will be loaded into the context and can be accessed via `ctx.get_weight(name)`
+     * In some cases, the tensor name is too long and GGML won't accept it. You can provide a name_replace_map to replace the name.
+     * For example:
+     *      name_replace_map = {{".acoustic_residual_vector_quantizer", ".arvq"}}
+     */
+    void load_safetensors(const char * fname, std::map<std::string, std::string> name_replace_map) {
+        auto fin = std::ifstream(fname, std::ios::binary);
+        if (!fin) {
+            throw std::runtime_error("cannot open model file: " + std::string(fname));
+        }
+
+        uint64_t metadata_size = 0;
+        fin.read(reinterpret_cast<char *>(&metadata_size), sizeof(metadata_size));
+        if (metadata_size < 2) {
+            throw std::runtime_error("invalid metadata size, got " + std::to_string(metadata_size));
+        }
+
+        std::vector<char> buf(metadata_size);
+        fin.read(buf.data(), metadata_size);
+        if (!fin) {
+            throw std::runtime_error("failed to read metadata");
+        }
+
+        safetensors_json_parser parser(buf.data(), metadata_size, name_replace_map);
+
+        ggml_init_params ggml_params = {
+            /*.mem_size   =*/ (parser.tensors.size() + 1) * ggml_tensor_overhead(),
+            /*.mem_buffer =*/ NULL,
+            /*.no_alloc   =*/ true,
+        };
+        ctx_data = ggml_init(ggml_params);
+        ctx_gguf = gguf_init_empty();
+
+        std::map<ggml_tensor *, uint64_t> offset_map;
+        for (auto & tensor : parser.tensors) {
+            ggml_tensor * t = ggml_new_tensor(ctx_data, tensor.type, 4, tensor.shape.data());
+            ggml_set_name(t, tensor.name.c_str());
+            gguf_add_tensor(ctx_gguf, t);
+            tensors.insert({tensor.name, t});
+            offset_map.insert({t, parser.get_data_offset() + tensor.offset});
+        }
+
+        // alloc memory and offload data
+        if (!load_tensors_to_backend(fin, offset_map)) {
+            throw std::runtime_error("failed to load tensors to backend");
+        }
+        log(GGML_LOG_LEVEL_INFO, "%s: Loaded %d tensors from %s\n", __func__, (int)gguf_get_n_tensors(ctx_gguf), fname);
+    }
+
+    /**
+     * Various utility functions for building a cgraph.
+     * 
+     * This object will be provided to the user's builder function as the last argument.
+     */
     struct build_utils {
         ggml_context * gf_ctx;
         ggml_cgraph  * gf;
@@ -371,6 +423,39 @@ struct ctx {
     }
 
 private:
+    bool load_tensors_to_backend(std::ifstream & fin, std::map<ggml_tensor *, uint64_t> & offset_map) {
+        std::vector<uint8_t> read_buf;
+        const bool use_custom_offset = !offset_map.empty();
+
+        // alloc memory and offload data
+        ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
+        buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx_data, buft);
+        ggml_backend_buffer_set_usage(buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+        for (int i = 0; i < gguf_get_n_tensors(ctx_gguf); ++i) {
+            const char * name = gguf_get_tensor_name(ctx_gguf, i);
+            ggml_tensor * cur = ggml_get_tensor(ctx_data, name);
+            const size_t offset = use_custom_offset
+                ? offset_map[cur]
+                : gguf_get_data_offset(ctx_gguf) + gguf_get_tensor_offset(ctx_gguf, i);
+            log(GGML_LOG_LEVEL_DEBUG, "%s: Loading tensor \"%s\"\n", __func__, name);
+            fin.seekg(offset, std::ios::beg);
+            if (!fin) {
+                log(GGML_LOG_LEVEL_ERROR, "failed to seek for tensor: %s", name);
+            }
+            int num_bytes = ggml_nbytes(cur);
+            if (ggml_backend_buft_is_host(buft)) {
+                // for the CPU and Metal backend, we can read directly into the tensor
+                fin.read(reinterpret_cast<char *>(cur->data), num_bytes);
+            } else {
+                // read into a temporary buffer first, then copy to device memory
+                read_buf.resize(num_bytes);
+                fin.read(reinterpret_cast<char *>(read_buf.data()), num_bytes);
+                ggml_backend_tensor_set(cur, read_buf.data(), 0, num_bytes);
+            }
+        }
+        return true;
+    }
+
     void log(ggml_log_level level, const char * format, ...) {
         va_list args;
         va_start(args, format);
@@ -394,9 +479,133 @@ private:
         }
         va_end(args_copy);
     }
-};
+}; // struct ctx
 
 using gf_build_fn = std::function<void(ggml_context *, ggml_cgraph *, ctx::build_utils &)>;
+
+////////////////////////////////////////
+
+safetensors_json_parser::safetensors_json_parser(
+        const char * json, size_t metadata_size, std::map<std::string, std::string> name_replace_map
+) : metadata_size(metadata_size) {
+    size_t i = 0;
+    state s = STATE_ROOT;
+    std::vector<char> buf;
+    tensor cur_tensor;
+    buf.reserve(128);
+    auto i_pp = [&]() {
+        if (++i > metadata_size) {
+            throw std::runtime_error("unexpected end of JSON");
+        }
+        return i - 1;
+    };
+    auto pp_i = [&]() {
+        if (++i > metadata_size) {
+            throw std::runtime_error("unexpected end of JSON");
+        }
+        return i;
+    };
+    auto read_until = [&](char end) -> std::string {
+        buf.clear(); i_pp();
+        while (json[i] != end) buf.push_back(json[i_pp()]);
+        return std::string(buf.data(), buf.size());
+    };
+    auto read_number = [&]() -> std::string {
+        buf.clear(); i_pp();
+        while ('0' <= json[i] && json[i] <= '9') buf.push_back(json[i_pp()]);
+        return std::string(buf.data(), buf.size());
+    };
+    while (i < metadata_size) {
+        char c = json[i];
+        if (i == 0) GGML_ASSERT(c == '{' && "json must start with open curly bracket");
+
+        // string
+        if (c == '\"') {
+            std::string key = read_until('\"');
+
+            if (s == STATE_ROOT) {
+                if (key == "__metadata__") {
+                    s = STATE_OBJ_METADATA;
+                    i_pp();
+                    continue;
+                } else {
+                    cur_tensor.name = key;
+                    for (auto & p : name_replace_map) {
+                        string_replace_all(cur_tensor.name, p.first, p.second);
+                    }
+                    if (cur_tensor.name.empty()) {
+                        throw std::runtime_error("empty tensor name");
+                    }
+                    if (cur_tensor.name.size() > GGML_MAX_NAME - 1) {
+                        throw std::runtime_error("tensor name too long: '" + cur_tensor.name + "'; please use name_replace_map to rename it");
+                    }
+                    i_pp();
+                    s = STATE_OBJ_TENSOR;
+                    continue;
+                }
+            } else if (s == STATE_OBJ_TENSOR) {
+                if (key == "dtype") {
+                    GGML_ASSERT(json[pp_i()] == ':');
+                    GGML_ASSERT(json[pp_i()] == '\"');
+                    std::string value = read_until('\"');
+                    /**/ if (value == "F32")  cur_tensor.type = GGML_TYPE_F32;
+                    else if (value == "F16")  cur_tensor.type = GGML_TYPE_F16;
+                    else if (value == "BF16") cur_tensor.type = GGML_TYPE_BF16;
+                    else throw std::runtime_error("unsupported dtype: " + value);
+                } else if (key == "shape") {
+                    GGML_ASSERT(json[pp_i()] == ':');
+                    GGML_ASSERT(json[pp_i()] == '[');
+                    std::vector<int64_t> values;
+                    for (int j = 0; j < 4; j++) {
+                        std::string value = read_number();
+                        if (value.empty()) break;
+                        values.push_back(std::stoll(value));
+                    }
+                    GGML_ASSERT(values.size() > 0);
+                    // flip column-major to row-major
+                    for (size_t j = 0; j < values.size(); j++) {
+                        cur_tensor.shape[j] = values[values.size() - j - 1];
+                    }
+                } else if (key == "data_offsets") {
+                    GGML_ASSERT(json[pp_i()] == ':');
+                    GGML_ASSERT(json[pp_i()] == '[');
+                    std::string off_start = read_number();
+                    GGML_ASSERT(!off_start.empty());
+                    cur_tensor.offset = std::stoull(off_start);
+                    std::string off_end = read_number();
+                    GGML_ASSERT(!off_end.empty()); // unused
+                }
+            }
+        }
+
+        // object
+        else if (c == '{') {
+            if (s == STATE_OBJ_METADATA) {
+                // skip metadata object
+                while (json[pp_i()] != '}') {}
+                s = STATE_ROOT;
+            } else if (s == STATE_OBJ_TENSOR) {
+                // read next string
+            }
+        } else if (c == '}') {
+            if (s == STATE_OBJ_TENSOR) {
+                // cur_tensor.print(); // debug
+                tensors.push_back(cur_tensor);
+                cur_tensor = {};
+                s = STATE_ROOT;
+            }
+        }
+
+        // ignore ',' and ':'
+        i++;
+    }
+}
+
+uint64_t safetensors_json_parser::get_data_offset() {
+    return GGML_PAD(8 + metadata_size, alignment);
+}
+
+////////////////////////////////////////
 
 namespace debug {
     static void print_backend_buffer_info(ctx & gctx) {
@@ -482,5 +691,39 @@ namespace debug {
         }
     }
 } // namespace debug
+
+////////////////////////////////////////
+
+std::string string_format(const char * fmt, ...) {
+    va_list ap;
+    va_list ap2;
+    va_start(ap, fmt);
+    va_copy(ap2, ap);
+    int size = vsnprintf(NULL, 0, fmt, ap);
+    GGML_ASSERT(size >= 0 && size < INT_MAX); // NOLINT
+    std::vector<char> buf(size + 1);
+    int size2 = vsnprintf(buf.data(), size + 1, fmt, ap2);
+    GGML_ASSERT(size2 == size);
+    va_end(ap2);
+    va_end(ap);
+    return std::string(buf.data(), size);
+}
+
+void string_replace_all(std::string & s, const std::string & search, const std::string & replace) {
+    if (search.empty()) {
+        return;
+    }
+    std::string builder;
+    builder.reserve(s.length());
+    size_t pos = 0;
+    size_t last_pos = 0;
+    while ((pos = s.find(search, last_pos)) != std::string::npos) {
+        builder.append(s, last_pos, pos - last_pos);
+        builder.append(replace);
+        last_pos = pos + search.length();
+    }
+    builder.append(s, last_pos, std::string::npos);
+    s = std::move(builder);
+}
 
 } // namespace ggml_easy
