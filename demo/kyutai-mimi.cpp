@@ -7,9 +7,9 @@
 /**
  * (Stil WIP) This is my trial to reimplement the Mimi model from Kyutai using ggml, the code is based on HF transformers implementation. See "modeling_mimi.py" for the original code.
  * 
- * To get the gguf:
+ * To get the model (we are using safetensors directly, no need to convert to GGUF):
  * 1. Download the model.safetensors file from https://huggingface.co/kyutai/mimi
- * 2. Run: python convert_safetensors_to_gguf.py --outtype f32 model.safetensors mimi.gguf
+ * 2. Rename the "model.safetensors" to "mimi.safetensors"
  * 
  * Note: do NOT upload the gguf to the internet, it is NOT compatible with llama.cpp and people will complain.
  * 
@@ -606,7 +606,11 @@ int main() {
     params.use_gpu = false;
     ggml_easy::ctx ctx(params);
 
-    ctx.load_gguf("mimi.gguf");
+    // ctx.load_gguf("mimi.gguf");
+    ctx.load_safetensors("mimi.safetensors", {
+        {".acoustic_residual_vector_quantizer", ".acoustic_rvq"},
+        {".semantic_residual_vector_quantizer", ".semantic_rvq"},
+    });
 
     // optional: print backend buffer info
     ggml_easy::debug::print_backend_buffer_info(ctx);
