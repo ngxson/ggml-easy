@@ -74,19 +74,11 @@ void string_replace_all(std::string & s, const std::string & search, const std::
 
 struct ctx {
     ggml_log_level log_level;
-    gguf_context * ctx_gguf = nullptr;
-    ggml_context * ctx_data = nullptr;
-    ggml_context * ctx_gf   = nullptr;
 
     std::unordered_map<std::string, ggml_tensor *> tensors;
 
-    struct printed_tensor {
-        ggml_tensor * t;
-        bool full;
-    };
-    std::vector<printed_tensor> dbg_printed_tensors;
-
-    ggml_cgraph * gf = nullptr;
+    ggml_cgraph  * gf     = nullptr;
+    ggml_context * ctx_gf = nullptr;
     std::vector<uint8_t> buf_compute_meta;
     int max_nodes;
 
@@ -99,6 +91,22 @@ struct ctx {
 
     ggml_backend_sched_ptr sched;
 
+private:
+    // private data members
+    struct loaded_gguf {
+        gguf_context_ptr ctx_gguf;
+        ggml_context_ptr ctx_data;
+    };
+    std::vector<loaded_gguf> loaded_ggufs;
+
+    struct printed_tensor {
+        ggml_tensor * t;
+        bool full;
+    };
+    std::vector<printed_tensor> dbg_printed_tensors;
+
+
+public:
     /**
      * Construct a new ctx object
      * If use_gpu is true, the GPU backend will be used, otherwise the CPU backend will be used
@@ -159,7 +167,7 @@ struct ctx {
             /*.ctx      = */ &meta,
         };
 
-        ctx_gguf = gguf_init_from_file(fname, params);
+        gguf_context * ctx_gguf = gguf_init_from_file(fname, params);
 
         // load tensors
         const int n_tensors = gguf_get_n_tensors(ctx_gguf);
@@ -169,7 +177,7 @@ struct ctx {
             /*.no_alloc   =*/ true,
         };
 
-        ctx_data = ggml_init(ggml_params);
+        ggml_context * ctx_data = ggml_init(ggml_params);
         auto fin = std::ifstream(fname, std::ios::binary);
         if (!fin) {
             ggml_free(meta);
@@ -187,12 +195,17 @@ struct ctx {
 
         // alloc memory and offload data
         std::map<ggml_tensor *, uint64_t> offset_map; // empty map, use default value
-        if (!load_tensors_to_backend(fin, offset_map)) {
+        if (!load_tensors_to_backend(fin, offset_map, ctx_gguf, ctx_data)) {
             ggml_free(meta);
             throw std::runtime_error("failed to load tensors to backend");
         }
         log(GGML_LOG_LEVEL_INFO, "%s: Loaded %d tensors from %s\n", __func__, n_tensors, fname);
         ggml_free(meta);
+
+        loaded_ggufs.push_back({
+            gguf_context_ptr(ctx_gguf),
+            ggml_context_ptr(ctx_data),
+        });
     }
 
     /**
@@ -227,8 +240,8 @@ struct ctx {
             /*.mem_buffer =*/ NULL,
             /*.no_alloc   =*/ true,
         };
-        ctx_data = ggml_init(ggml_params);
-        ctx_gguf = gguf_init_empty();
+        ggml_context * ctx_data = ggml_init(ggml_params);
+        gguf_context * ctx_gguf = gguf_init_empty();
 
         std::map<ggml_tensor *, uint64_t> offset_map;
         for (auto & tensor : parser.tensors) {
@@ -240,10 +253,15 @@ struct ctx {
         }
 
         // alloc memory and offload data
-        if (!load_tensors_to_backend(fin, offset_map)) {
+        if (!load_tensors_to_backend(fin, offset_map, ctx_gguf, ctx_data)) {
             throw std::runtime_error("failed to load tensors to backend");
         }
         log(GGML_LOG_LEVEL_INFO, "%s: Loaded %d tensors from %s\n", __func__, (int)gguf_get_n_tensors(ctx_gguf), fname);
+
+        loaded_ggufs.push_back({
+            gguf_context_ptr(ctx_gguf),
+            ggml_context_ptr(ctx_data),
+        });
     }
 
     /**
@@ -286,6 +304,10 @@ struct ctx {
         template <typename ...Params>
         void debug_print(ggml_tensor * t, Params&&... params) {
             std::string name = string_format(std::forward<Params>(params)...);
+            if (t->flags) {
+                // prevent renaming input/output tensor name by accident
+                t = ggml_cpy(gf_ctx, t, ggml_dup_tensor(gf_ctx, t));
+            }
             mark_output(t, name.c_str());
             printed_tensors.push_back({t, false});
         }
@@ -295,6 +317,10 @@ struct ctx {
         template <typename ...Params>
         void debug_print_full(ggml_tensor * t, Params&&... params) {
             std::string name = string_format(std::forward<Params>(params)...);
+            if (t->flags) {
+                // prevent renaming input/output tensor name by accident
+                t = ggml_cpy(gf_ctx, t, ggml_dup_tensor(gf_ctx, t));
+            }
             mark_output(t, name.c_str());
             printed_tensors.push_back({t, true});
         }
@@ -417,13 +443,11 @@ struct ctx {
     }
 
     ~ctx() {
-        ggml_free(ctx_data);
-        gguf_free(ctx_gguf);
         ggml_backend_buffer_free(buf);
     }
 
 private:
-    bool load_tensors_to_backend(std::ifstream & fin, std::map<ggml_tensor *, uint64_t> & offset_map) {
+    bool load_tensors_to_backend(std::ifstream & fin, std::map<ggml_tensor *, uint64_t> & offset_map, gguf_context * ctx_gguf, ggml_context * ctx_data) {
         std::vector<uint8_t> read_buf;
         const bool use_custom_offset = !offset_map.empty();
 
