@@ -45,7 +45,6 @@ namespace debug {
 
 // forward declaration for safetensors (lightweight) JSON parser
 struct safetensors_json_parser {
-    static const int alignment = 32; // bytes
     enum state {
         STATE_ROOT,
         STATE_OBJ_METADATA,
@@ -626,6 +625,8 @@ safetensors_json_parser::safetensors_json_parser(
 }
 
 uint64_t safetensors_json_parser::get_data_offset() {
+    // alignment: https://github.com/huggingface/safetensors/blob/7d5af853631628137a79341ddc5611d18a17f3fe/safetensors/src/tensor.rs#L202
+    static const int alignment = 8; // bytes
     return GGML_PAD(8 + metadata_size, alignment);
 }
 
