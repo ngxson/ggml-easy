@@ -12,7 +12,8 @@ set(DEMO_TARGETS
     dyt-rms
     svd
     kyutai-mimi
-    safetensors)
+    safetensors
+    whisper-encoder)
 
 foreach(TARGET ${DEMO_TARGETS})
   add_executable(${TARGET} demo/${TARGET}.cpp)
