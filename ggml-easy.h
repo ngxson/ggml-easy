@@ -404,7 +404,6 @@ public:
         if (t->type != GGML_TYPE_F32) {
             throw std::runtime_error(string_format("tensor type must be GGML_TYPE_F32: %s", name.c_str()));
         }
-        ggml_easy::debug::print_tensor_shape(t);
         std::vector<float> data(ggml_nelements(t));
         for (int d3 = 0; d3 < t->ne[3]; ++d3) {
             for (int d2 = 0; d2 < t->ne[2]; ++d2) {
