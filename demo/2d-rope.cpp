@@ -3,10 +3,11 @@
 #include <iostream>
 
 /**
- * Experimen with 2D RoPE used on Mistral's Pixtral model
+ * Experiment with 2D RoPE used on Mistral's Pixtral model
  */
 
-ggml_tensor * build_rope_2d(
+// implementation of the 2D RoPE without adding a new op in ggml
+static ggml_tensor * build_rope_2d(
     ggml_cgraph * gf,
     ggml_context * ctx0,
     ggml_tensor * cur,
@@ -19,30 +20,27 @@ ggml_tensor * build_rope_2d(
     const int64_t n_head = cur->ne[1];
     const int64_t n_pos  = cur->ne[2];
 
-    // for example, if we have a list of inv_freq: 1e-0, 1e-1, 1e-2, 1e-3
-    // first half will use 1e-0, 1e-2 (even)
-    // second half will use 1e-1, 1e-3 (odd)
-    // the trick here is to rotate just half of n_dim, so inv_freq will automatically be even (don't ask me why, it's math!)
-    // then for the second half, we use freq_scale to shift the inv_freq by 0.1
+    // for example, if we have cur tensor of shape (n_dim=8, n_head, n_pos)
+    // we will have a list of 4 inv_freq: 1e-0, 1e-1, 1e-2, 1e-3
+    // first half of cur will use 1e-0, 1e-2 (even)
+    // second half of cur will use 1e-1, 1e-3 (odd)
+    // the trick here is to rotate just half of n_dim, so inv_freq will automatically be even
+    //  ^ don't ask me why, it's math! -2(2i) / n_dim == -2i / (n_dim/2)
+    // then for the second half, we use freq_scale to shift the inv_freq
+    //  ^ why? replace (2i) with (2i+1) in the above equation
+    const float freq_scale = std::pow(freq_base, (float)-2/n_dim);
 
     // first half
     {
-        tmp = ggml_view_3d(ctx0, cur,
-            n_dim/2, n_head, n_pos,
-            ggml_row_size(cur->type, n_dim),
-            ggml_row_size(cur->type, n_dim*n_head),
-            0);
-        tmp = ggml_rope_ext_inplace(
+        cur = ggml_rope_ext_inplace(
             ctx0,
-            tmp,
+            cur,
             pos_h,      // positions
             nullptr,    // freq factors
-            tmp->ne[0], // n_dims
+            n_dim/2,    // n_dims
             0, 0, freq_base,
             1.0f, 0.0f, 1.0f, 0.0f, 0.0f
         );
-        // calculate inplace (modify cur directly)
-        ggml_build_forward_expand(gf, tmp);
     }
 
     // second half
@@ -57,12 +55,11 @@ ggml_tensor * build_rope_2d(
             tmp,
             pos_w,      // positions
             nullptr,    // freq factors
-            tmp->ne[0], // n_dims
+            n_dim/2,    // n_dims
             0, 0, freq_base,
-            0.1f,       // TODO: this only works with base_freq=10000.0f
+            freq_scale,
             0.0f, 1.0f, 0.0f, 0.0f
         );
-        GGML_ASSERT(freq_base == 10000.0f); // see above
         // calculate inplace (modify cur directly)
         ggml_build_forward_expand(gf, tmp);
     }
@@ -76,8 +73,8 @@ int main() {
 
     const int n_sz  = 3;
     const int n_pos = n_sz * n_sz;
-    const int n_dim = 8;
-    const int n_head = 2;
+    const int n_dim = 12;
+    const int n_head = 1;
 
     // create cgraph
     ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf, auto & utils) {
@@ -86,7 +83,7 @@ int main() {
         ggml_tensor * vector = utils.new_input("vector", GGML_TYPE_F32, n_dim*n_head, n_pos);
         vector = ggml_reshape_3d(ctx_gf, vector, n_dim, n_head, n_pos);
         ggml_tensor * result = build_rope_2d(gf, ctx_gf, vector, pos_h, pos_w, 10000.0f);
-        //result = ggml_reshape_2d(ctx_gf, result, n_dim*n_head, n_pos);
+        result = ggml_reshape_2d(ctx_gf, result, n_dim*n_head, n_pos);
         utils.mark_output(result, "result");
     });
 
