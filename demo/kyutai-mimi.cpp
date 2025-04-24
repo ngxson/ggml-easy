@@ -294,10 +294,10 @@ struct mimi_encoder_decoder {
                 .is_elu = true, // layer (i_start)
             });
             layers.push_back({
+                .is_transposed_conv = true,
                 .conv_0_w = ctx.get_weight("decoder.layers.%d.conv.weight", i_start + 1),
                 .conv_0_b = ctx.get_weight("decoder.layers.%d.conv.bias",   i_start + 1),
                 .stride = mimi_config.upsampling_ratio[i],
-                .is_transposed_conv = true,
             });
             // residual layers
             layers.push_back({

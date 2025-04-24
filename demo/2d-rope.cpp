@@ -1,6 +1,7 @@
 #include "ggml.h"
 #include "ggml-easy.h"
 #include <iostream>
+#include <cmath>
 
 /**
  * Experiment with 2D RoPE used on Mistral's Pixtral model
