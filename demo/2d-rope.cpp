@@ -8,15 +8,14 @@
  */
 
 // implementation of the 2D RoPE without adding a new op in ggml
+// this is not efficient (use double the memory), but works on all backends
 static ggml_tensor * build_rope_2d(
-    ggml_cgraph * gf,
     ggml_context * ctx0,
     ggml_tensor * cur,
     ggml_tensor * pos_h,
     ggml_tensor * pos_w,
     const float freq_base
 ) {
-    ggml_tensor * tmp;
     const int64_t n_dim  = cur->ne[0];
     const int64_t n_head = cur->ne[1];
     const int64_t n_pos  = cur->ne[2];
@@ -29,13 +28,22 @@ static ggml_tensor * build_rope_2d(
     //  ^ don't ask me why, it's math! -2(2i) / n_dim == -2i / (n_dim/2)
     // then for the second half, we use freq_scale to shift the inv_freq
     //  ^ why? replace (2i) with (2i+1) in the above equation
-    const float freq_scale = std::pow(freq_base, (float)-2/n_dim);
+    const float freq_scale_odd = std::pow(freq_base, (float)-2/n_dim);
+    printf("freq_base = %f\n", freq_base);
+    printf("exp = %f\n", (float)-2/n_dim);
+    printf("freq_scale_odd = %f\n", freq_scale_odd);
 
     // first half
+    ggml_tensor * first;
     {
-        cur = ggml_rope_ext_inplace(
+        first = ggml_view_3d(ctx0, cur,
+            n_dim/2, n_head, n_pos,
+            ggml_row_size(cur->type, n_dim),
+            ggml_row_size(cur->type, n_dim*n_head),
+            0);
+        first = ggml_rope_ext(
             ctx0,
-            cur,
+            first,
             pos_h,      // positions
             nullptr,    // freq factors
             n_dim/2,    // n_dims
@@ -45,26 +53,27 @@ static ggml_tensor * build_rope_2d(
     }
 
     // second half
+    ggml_tensor * second;
     {
-        tmp = ggml_view_3d(ctx0, cur,
+        second = ggml_view_3d(ctx0, cur,
             n_dim/2, n_head, n_pos,
             ggml_row_size(cur->type, n_dim),
             ggml_row_size(cur->type, n_dim*n_head),
             n_dim/2 * ggml_element_size(cur));
-        tmp = ggml_rope_ext_inplace(
+        second = ggml_cont(ctx0, second); // copy, because ggml_rope don't play well with non-contiguous tensors
+        second = ggml_rope_ext(
             ctx0,
-            tmp,
+            second,
             pos_w,      // positions
             nullptr,    // freq factors
             n_dim/2,    // n_dims
             0, 0, freq_base,
-            freq_scale,
+            freq_scale_odd,
             0.0f, 1.0f, 0.0f, 0.0f
         );
-        // calculate inplace (modify cur directly)
-        ggml_build_forward_expand(gf, tmp);
     }
 
+    cur = ggml_concat(ctx0, first, second, 0);
     return cur;
 }
 
@@ -83,7 +92,7 @@ int main() {
         ggml_tensor * pos_w = utils.new_input("pos_w", GGML_TYPE_I32, n_pos);
         ggml_tensor * vector = utils.new_input("vector", GGML_TYPE_F32, n_dim*n_head, n_pos);
         vector = ggml_reshape_3d(ctx_gf, vector, n_dim, n_head, n_pos);
-        ggml_tensor * result = build_rope_2d(gf, ctx_gf, vector, pos_h, pos_w, 10000.0f);
+        ggml_tensor * result = build_rope_2d(ctx_gf, vector, pos_h, pos_w, 10000.0f);
         result = ggml_reshape_2d(ctx_gf, result, n_dim*n_head, n_pos);
         utils.mark_output(result, "result");
     });
@@ -103,9 +112,6 @@ int main() {
         return 1.0;
     });
 
-    // optional: print backend buffer info
-    ggml_easy::debug::print_backend_buffer_info(ctx);
-
     // compute
     ggml_status status = ctx.compute();
 
@@ -116,6 +122,61 @@ int main() {
 
     // print result
     ggml_easy::debug::print_tensor_data(result_tensor, result_data.data(), 999);
+
+
+    //
+    // implementation using ggml_rope_multi
+    //
+
+    /*{
+        // create cgraph
+        ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf, auto & utils) {
+            ggml_tensor * pos = utils.new_input("pos", GGML_TYPE_I32, n_pos*4);
+            ggml_tensor * vector = utils.new_input("vector", GGML_TYPE_F32, n_dim*n_head, n_pos);
+
+            ggml_tensor * cur = ggml_reshape_3d(ctx_gf, vector, n_dim, n_head, n_pos);
+            {
+                const int n_dim  = cur->ne[0];
+                const int n_head = cur->ne[1];
+                const int n_pos  = cur->ne[2];
+                int sections[4] = {n_dim/2, 1, 0, 0};
+                cur = ggml_rope_multi(
+                    ctx_gf,
+                    cur,
+                    pos,        // positions
+                    nullptr,    // freq factors
+                    n_dim,      // n_dims
+                    sections,   // sections
+                    GGML_ROPE_TYPE_MROPE,
+                    0, 10000.0f,
+                    1.0f, 0.0f, 1.0f, 0.0f, 0.0f
+                );
+            }
+
+            cur = ggml_reshape_2d(ctx_gf, cur, n_dim*n_head, n_pos);
+            utils.mark_output(cur, "result");
+        });
+
+        // set data
+        std::vector<int32_t> positions(n_pos*4, 0);
+        for (int i = 0; i < n_pos; ++i) positions[i + n_pos*0] = i / n_sz;
+        for (int i = 0; i < n_pos; ++i) positions[i + n_pos*1] = i % n_sz;
+        ctx.set_tensor_data("pos", positions.data());
+        ctx.set_tensor_data("vector", [](int i0, int i1, int i2, int i3) {
+            return 1.0;
+        });
+
+        // compute
+        ctx.compute();
+
+        // get result
+        result = ctx.get_tensor_data("result");
+        ggml_tensor * result_tensor        = result.first;
+        std::vector<uint8_t> & result_data = result.second;
+
+        // print result
+        ggml_easy::debug::print_tensor_data(result_tensor, result_data.data(), 999);
+    }*/
 
     return 0;
 }
