@@ -1,6 +1,7 @@
 #include "ggml.h"
 #include "ggml-easy.h"
 #include <iostream>
+#include <cmath>
 
 /**
  * This example demonstrates how to load safetensors directly to GGML without any conversions.
@@ -52,7 +53,7 @@ int main() {
         for (size_t i = 0; i < ggml_nelements(tensor0); ++i) {
             float v0 = ggml_get_f32_1d(tensor0, i);
             float v1 = ggml_get_f32_1d(tensor1, i);
-            diff += fabs(v0 - v1);
+            diff += std::abs(v0 - v1);
         }
 
         printf("%-60s: diff = %f\n", t.first.c_str(), diff);

@@ -2,6 +2,7 @@
 #include "ggml-easy.h"
 #include <iostream>
 #include <float.h>
+#include <cmath>
 
 
 /**

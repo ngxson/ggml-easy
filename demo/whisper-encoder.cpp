@@ -2,6 +2,7 @@
 #include "ggml-easy.h"
 #include <iostream>
 #include <thread>
+#include <cmath>
 
 #define WHISPER_ASSERT GGML_ASSERT
 
