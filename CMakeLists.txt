@@ -14,7 +14,8 @@ set(DEMO_TARGETS
     kyutai-mimi
     safetensors
     whisper-encoder
-    2d-rope)
+    2d-rope
+    random)
 
 foreach(TARGET ${DEMO_TARGETS})
   add_executable(${TARGET} demo/${TARGET}.cpp)
