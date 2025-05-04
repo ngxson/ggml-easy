@@ -83,9 +83,9 @@ int main() {
 
     const bool is_llama = true; // false meaning pixtral
 
-    const int n_sz  = 3;
+    const int n_sz  = 336/14;
     const int n_pos = n_sz * n_sz + (is_llama ? 1 : 0); // 1 for CLS token
-    const int n_dim = 8;
+    const int n_dim = 1408;
     const int n_head = 1;
 
     // create cgraph
@@ -103,25 +103,17 @@ int main() {
 
     // set data
     if (is_llama) {
-        auto py_div_floor = [](int a, int b) { // mimic "//" operator in python for negative numbers
-            return (a / b) - ((a % b != 0 && ((a < 0) ^ (b < 0))) ? 1 : 0);
-        };
-        auto py_mod = [](int a, int b) { // mimic "%" operator in python for negative numbers
-            return (a % b + b) % b;
-        };
-        std::vector<int32_t> positions(n_pos);
-        for (int i = 0; i < n_pos; ++i) {
+        std::vector<int32_t> positions(n_pos - 1, 0);
+        for (int i = 0; i < n_pos- 1; ++i) {
             positions[i] = (i / n_sz) + 1;
             // printf("pos_h[%d] = %d\n", i, positions[i]);
         }
-        positions[positions.size() - 1] = 0;
         printf("\n");
         ctx.set_tensor_data("pos_h", positions.data());
-        for (int i = 0; i < n_pos; ++i) {
+        for (int i = 0; i < n_pos- 1; ++i) {
             positions[i] = (i % n_sz) + 1;
             // printf("pos_w[%d] = %d\n", i, positions[i]);
         }
-        positions[positions.size() - 1] = 0;
         ctx.set_tensor_data("pos_w", positions.data());
     } else {
         std::vector<int32_t> positions(n_pos);
@@ -148,7 +140,7 @@ int main() {
     std::vector<uint8_t> & result_data = result.second;
 
     // print result
-    ggml_easy::debug::print_tensor_data(result_tensor, result_data.data(), 999);
+    ggml_easy::debug::print_tensor_data(result_tensor, result_data.data());
 
 
     //

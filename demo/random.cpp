@@ -41,5 +41,31 @@ int main() {
         ctx.compute();
     }
 
+    printf("\n\n\nLlama4UnfoldConvolution\n\n");
+    {
+        const int h = 4;
+        const int w = 4;
+        const int k = 2;
+        ctx.build_graph([&](ggml_context * ctx0, ggml_cgraph * gf, auto & utils) {
+            ggml_tensor * inp = utils.new_input("inp", GGML_TYPE_F32, h, w, 3);
+            ggml_tensor * x = inp;
+            utils.debug_print(ggml_scale(ctx0, inp, 1.0f), "inp0");
+
+            ggml_tensor * kernel = ggml_view_3d(ctx0, inp, k, k, x->ne[2], 0, 0, 0);
+            x = ggml_im2col(ctx0, kernel, x, k, k, 0, 0, 1, 1, true, inp->type);
+
+            utils.debug_print_full(x, "im2col");
+
+            x = ggml_reshape_2d(ctx0, x, x->ne[0], x->ne[1] * x->ne[2]);
+            utils.debug_print(x, "result");
+        });
+        std::vector<float> inp_data(h * w * 3);
+        for (int i = 0; i < h * w * 3; ++i) {
+            inp_data[i] = (float)i;
+        }
+        ctx.set_tensor_data("inp", inp_data.data());
+        ctx.compute();
+    }
+
     return 0;
 }
