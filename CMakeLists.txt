@@ -13,6 +13,7 @@ set(DEMO_TARGETS
     svd
     kyutai-mimi
     safetensors
+    ultravox-encoder
     whisper-encoder
     2d-rope
     random)
