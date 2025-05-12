@@ -77,6 +77,8 @@ static ggml_tensor * build_rope_2d(
     return cur;
 }
 
+void test_mrope(ggml_easy::ctx & ctx);
+
 int main() {
     ggml_easy::ctx_params params;
     ggml_easy::ctx ctx(params);
@@ -142,60 +144,90 @@ int main() {
     // print result
     ggml_easy::debug::print_tensor_data(result_tensor, result_data.data());
 
-
-    //
-    // implementation using ggml_rope_multi
-    //
-
-    /*{
-        // create cgraph
-        ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf, auto & utils) {
-            ggml_tensor * pos = utils.new_input("pos", GGML_TYPE_I32, n_pos*4);
-            ggml_tensor * vector = utils.new_input("vector", GGML_TYPE_F32, n_dim*n_head, n_pos);
-
-            ggml_tensor * cur = ggml_reshape_3d(ctx_gf, vector, n_dim, n_head, n_pos);
-            {
-                const int n_dim  = cur->ne[0];
-                const int n_head = cur->ne[1];
-                const int n_pos  = cur->ne[2];
-                int sections[4] = {n_dim/2, 1, 0, 0};
-                cur = ggml_rope_multi(
-                    ctx_gf,
-                    cur,
-                    pos,        // positions
-                    nullptr,    // freq factors
-                    n_dim,      // n_dims
-                    sections,   // sections
-                    GGML_ROPE_TYPE_MROPE,
-                    0, 10000.0f,
-                    1.0f, 0.0f, 1.0f, 0.0f, 0.0f
-                );
-            }
-
-            cur = ggml_reshape_2d(ctx_gf, cur, n_dim*n_head, n_pos);
-            utils.mark_output(cur, "result");
-        });
-
-        // set data
-        std::vector<int32_t> positions(n_pos*4, 0);
-        for (int i = 0; i < n_pos; ++i) positions[i + n_pos*0] = i / n_sz;
-        for (int i = 0; i < n_pos; ++i) positions[i + n_pos*1] = i % n_sz;
-        ctx.set_tensor_data("pos", positions.data());
-        ctx.set_tensor_data("vector", [](int i0, int i1, int i2, int i3) {
-            return 1.0;
-        });
-
-        // compute
-        ctx.compute();
-
-        // get result
-        result = ctx.get_tensor_data("result");
-        ggml_tensor * result_tensor        = result.first;
-        std::vector<uint8_t> & result_data = result.second;
-
-        // print result
-        ggml_easy::debug::print_tensor_data(result_tensor, result_data.data(), 999);
-    }*/
+    test_mrope(ctx);
 
     return 0;
+}
+
+//
+// experiment with ggml_rope_multi
+//
+
+void test_mrope(ggml_easy::ctx & ctx) {
+    //const int n_sz = 3;
+    const int n_dim = 12;
+    const int n_head = 1;
+    const int n_pos = 6;
+
+    printf("\n\n--- test_mrope ---\n");
+
+    // create cgraph
+    ctx.build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf, auto & utils) {
+        ggml_tensor * pos = utils.new_input("pos", GGML_TYPE_I32, n_pos*4);
+        ggml_tensor * vector = utils.new_input("vector", GGML_TYPE_F32, n_dim*n_head, n_pos);
+
+        ggml_tensor * cur;
+        ggml_tensor * x = ggml_reshape_3d(ctx_gf, vector, n_dim, n_head, n_pos);
+        {
+            const int n_dim  = x->ne[0];
+            const int n_head = x->ne[1];
+            const int n_pos  = x->ne[2];
+            int sections[4] = {1, 1, 1, 0};
+            cur = ggml_rope_multi(
+                ctx_gf,
+                x,
+                pos,        // positions
+                nullptr,    // freq factors
+                n_dim,      // n_dims
+                sections,   // sections
+                GGML_ROPE_TYPE_MROPE,
+                0, 10000.0f,
+                1.0f, 0.0f, 1.0f, 0.0f, 0.0f
+            );
+        }
+
+        cur = ggml_reshape_2d(ctx_gf, cur, n_dim*n_head, n_pos);
+        utils.debug_print_full(cur, "mrope");
+
+        {
+            ggml_tensor * pos_a = ggml_view_1d(ctx_gf, pos, n_pos, 0);
+            const int n_dim  = x->ne[0];
+            const int n_head = x->ne[1];
+            const int n_pos  = x->ne[2];
+            int sections[4] = {1, 1, 1, 0};
+            cur = ggml_rope_ext(
+                ctx_gf,
+                x,
+                pos_a,      // positions
+                nullptr,    // freq factors
+                n_dim,    // n_dims
+                GGML_ROPE_TYPE_NEOX, 0, 10000.0f,
+                1.0f, 0.0f, 1.0f, 0.0f, 0.0f
+            );
+        }
+
+        cur = ggml_reshape_2d(ctx_gf, cur, n_dim*n_head, n_pos);
+        utils.debug_print_full(cur, "normal_rope");
+    });
+
+    // set data
+    std::vector<int32_t> positions(n_pos*4, 0);
+    //for (int i = 0; i < n_pos; ++i) positions[i + n_pos*0] = i / n_sz;
+    for (int i = 0; i < n_pos; ++i) positions[i + n_pos*0] = i;
+    for (int i = 0; i < n_pos; ++i) positions[i + n_pos*1] = i;
+    for (int i = 0; i < n_pos; ++i) positions[i + n_pos*2] = i;
+    for (int i = 0; i < n_pos; ++i) positions[i + n_pos*3] = 0;
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < n_pos; ++j) {
+            printf("%d ", positions[i*n_pos + j]);
+        }
+        printf("\n");
+    }
+    ctx.set_tensor_data("pos", positions.data());
+    ctx.set_tensor_data("vector", [](int i0, int i1, int i2, int i3) {
+        return 1.0;
+    });
+
+    // compute
+    ctx.compute();
 }

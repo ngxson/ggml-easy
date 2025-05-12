@@ -704,7 +704,7 @@ namespace debug {
                         } else {
                             GGML_ABORT("fatal error");
                         }
-                        printf("%12.4f", v);
+                        printf("%8.4f", v);
                         if (i0 < ne[0] - 1) printf(", ");
                     }
                     printf("],\n");
