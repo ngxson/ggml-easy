@@ -27,6 +27,7 @@ struct ctx_params {
     bool use_gpu = true;
     int max_nodes = 8192;
     ggml_log_level log_level = GGML_LOG_LEVEL_INFO;
+    bool safetensors_ignore_unknown_dtype = false;
 };
 
 void log_cb(ggml_log_level level, const char * text, void * cur_lvl_ptr) {
@@ -53,6 +54,7 @@ struct safetensors_json_parser {
     };
     struct tensor {
         std::string name;
+        bool ignored = false;
         ggml_type type = GGML_TYPE_F32; // only F32, F16, BF16 are supported
         std::array<int64_t, 4> shape = {0, 1, 1, 1}; // row-major order
         uint64_t offset = 0;
@@ -61,9 +63,10 @@ struct safetensors_json_parser {
                 name.c_str(), ggml_type_name(type), shape[0], shape[1], shape[2], shape[3], offset);
         }
     };
+    bool ignore_unknown_dtype = false;
     std::vector<tensor> tensors;
     size_t metadata_size = 0;
-    safetensors_json_parser(const char * json, size_t metadata_size, std::map<std::string, std::string> name_replace_map);
+    safetensors_json_parser(const char * json, size_t metadata_size, std::map<std::string, std::string> name_replace_map, bool ignore_unknown_dtype);
     uint64_t get_data_offset();
 };
 
@@ -104,6 +107,7 @@ private:
         bool full;
     };
     std::vector<printed_tensor> dbg_printed_tensors;
+    bool safetensors_ignore_unknown_dtype;
 
 
 public:
@@ -113,6 +117,7 @@ public:
      */
     ctx(const ctx_params & params) : log_level(params.log_level), max_nodes(params.max_nodes) {
         ggml_log_set(log_cb, &log_level);
+        safetensors_ignore_unknown_dtype = params.safetensors_ignore_unknown_dtype;
         backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
         backend     = params.use_gpu
                         ? ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr)
@@ -233,7 +238,7 @@ public:
             throw std::runtime_error("failed to read metadata");
         }
 
-        safetensors_json_parser parser(buf.data(), metadata_size, name_replace_map);
+        safetensors_json_parser parser(buf.data(), metadata_size, name_replace_map, safetensors_ignore_unknown_dtype);
 
         ggml_init_params ggml_params = {
             /*.mem_size   =*/ (parser.tensors.size() + 1) * ggml_tensor_overhead(),
@@ -509,8 +514,8 @@ using gf_build_fn = std::function<void(ggml_context *, ggml_cgraph *, ctx::build
 ////////////////////////////////////////
 
 safetensors_json_parser::safetensors_json_parser(
-        const char * json, size_t metadata_size, std::map<std::string, std::string> name_replace_map
-) : metadata_size(metadata_size) {
+        const char * json, size_t metadata_size, std::map<std::string, std::string> name_replace_map, bool ignore_unknown_dtype
+) : metadata_size(metadata_size), ignore_unknown_dtype(ignore_unknown_dtype) {
     size_t i = 0;
     state s = STATE_ROOT;
     std::vector<char> buf;
@@ -574,7 +579,8 @@ safetensors_json_parser::safetensors_json_parser(
                     /**/ if (value == "F32")  cur_tensor.type = GGML_TYPE_F32;
                     else if (value == "F16")  cur_tensor.type = GGML_TYPE_F16;
                     else if (value == "BF16") cur_tensor.type = GGML_TYPE_BF16;
-                    else throw std::runtime_error("unsupported dtype: " + value);
+                    else if (ignore_unknown_dtype) cur_tensor.ignored = true;
+                    else throw std::runtime_error("unknown dtype: " + value);
                 } else if (key == "shape") {
                     GGML_ASSERT(json[pp_i()] == ':');
                     GGML_ASSERT(json[pp_i()] == '[');
@@ -584,7 +590,7 @@ safetensors_json_parser::safetensors_json_parser(
                         if (value.empty()) break;
                         values.push_back(std::stoll(value));
                     }
-                    GGML_ASSERT(values.size() > 0);
+                    GGML_ASSERT(values.size() >= 0);
                     // flip column-major to row-major
                     for (size_t j = 0; j < values.size(); j++) {
                         cur_tensor.shape[j] = values[values.size() - j - 1];
@@ -613,7 +619,9 @@ safetensors_json_parser::safetensors_json_parser(
         } else if (c == '}') {
             if (s == STATE_OBJ_TENSOR) {
                 // cur_tensor.print(); // debug
-                tensors.push_back(cur_tensor);
+                if (!cur_tensor.ignored) {
+                    tensors.push_back(cur_tensor);
+                }
                 cur_tensor = {};
                 s = STATE_ROOT;
             }
