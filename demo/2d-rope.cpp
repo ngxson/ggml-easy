@@ -87,7 +87,7 @@ int main() {
 
     const int n_sz  = 336/14;
     const int n_pos = n_sz * n_sz + (is_llama ? 1 : 0); // 1 for CLS token
-    const int n_dim = 1408;
+    const int n_dim = 88;
     const int n_head = 1;
 
     // create cgraph
@@ -100,7 +100,8 @@ int main() {
             ? build_rope_2d(ctx_gf, vector, pos_w, pos_h, 10000.0f, false)
             : build_rope_2d(ctx_gf, vector, pos_h, pos_w, 10000.0f, true);
         result = ggml_reshape_2d(ctx_gf, result, n_dim*n_head, n_pos);
-        utils.mark_output(result, "result");
+        utils.debug_print(result, "result");
+        utils.debug_print(ggml_sum(ctx_gf, result), "result_sum");
     });
 
     // set data
@@ -135,14 +136,6 @@ int main() {
 
     // compute
     ggml_status status = ctx.compute();
-
-    // get result
-    auto result = ctx.get_tensor_data("result");
-    ggml_tensor * result_tensor        = result.first;
-    std::vector<uint8_t> & result_data = result.second;
-
-    // print result
-    ggml_easy::debug::print_tensor_data(result_tensor, result_data.data());
 
     test_mrope(ctx);
 
