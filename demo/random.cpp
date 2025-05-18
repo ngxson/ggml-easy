@@ -43,25 +43,45 @@ int main() {
 
     printf("\n\n\nLlama4UnfoldConvolution\n\n");
     {
-        const int h = 4;
-        const int w = 4;
-        const int k = 2;
+        ggml_easy::ctx ctx(params);
+        ctx.load_safetensors("../models/llama4vit.safetensors", {});
+
+        ggml_tensor * patch_embeddings_0 = ctx.get_weight("vision_model.patch_embedding.linear.weight");
+
+        const int h = 336;
+        const int w = 336;
+        const int patch_size = 14;
+        const int n_embd = 1408;
+        const int n_patches = (h / patch_size) * (w / patch_size);
+
         ctx.build_graph([&](ggml_context * ctx0, ggml_cgraph * gf, auto & utils) {
             ggml_tensor * inp = utils.new_input("inp", GGML_TYPE_F32, h, w, 3);
-            ggml_tensor * x = inp;
-            utils.debug_print(ggml_scale(ctx0, inp, 1.0f), "inp0");
+            
+            // Llama4UnfoldConvolution
+            {
+                ggml_tensor * kernel = ggml_reshape_4d(ctx0, patch_embeddings_0,
+                                                        patch_size, patch_size, 3, n_embd);
+                inp = ggml_im2col(ctx0, kernel, inp, patch_size, patch_size, 0, 0, 1, 1, true, inp->type);
+                //inp = ggml_reshape_2d(ctx0, inp, inp->ne[0], inp->ne[1] * inp->ne[2]); // flatten to 2D
+                utils.debug_print(inp, "im2col");
+                utils.debug_print(ggml_sum(ctx0, inp), "im2col_sum");
 
-            ggml_tensor * kernel = ggml_view_3d(ctx0, inp, k, k, x->ne[2], 0, 0, 0);
-            x = ggml_im2col(ctx0, kernel, x, k, k, 0, 0, 1, 1, true, inp->type);
+                utils.debug_print(ggml_cast(ctx0, patch_embeddings_0, GGML_TYPE_F32), "patch_embeddings_0");
 
-            utils.debug_print_full(x, "im2col");
+                inp = ggml_mul_mat(ctx0, patch_embeddings_0, inp);
+                utils.debug_print(inp, "patch_conv");
+                utils.debug_print(ggml_sum(ctx0, inp), "patch_conv_sum");
 
-            x = ggml_reshape_2d(ctx0, x, x->ne[0], x->ne[1] * x->ne[2]);
-            utils.debug_print(x, "result");
+                inp = ggml_reshape_2d(ctx0, inp, n_embd, n_patches);
+            }
+
+            //inp = ggml_reshape_2d(ctx0, inp, inp->ne[0], inp->ne[1] * inp->ne[2]);
+            utils.debug_print(inp, "result");
         });
-        std::vector<float> inp_data(h * w * 3);
-        for (int i = 0; i < h * w * 3; ++i) {
-            inp_data[i] = (float)i;
+
+        std::vector<float> inp_data(h * w * 3, 0.0);
+        for (int i = 0; i < h * w; ++i) {
+            inp_data[i] = 1.0; //(float)i * 0.1;
         }
         ctx.set_tensor_data("inp", inp_data.data());
         ctx.compute();
