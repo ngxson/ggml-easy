@@ -55,8 +55,8 @@ struct ultravox_encoder {
         conv1d_1_w = ctx.get_weight("%s.conv1d.1.weight", prefix);
         conv1d_2_b = ctx.get_weight("%s.conv1d.2.bias",   prefix);
         conv1d_2_w = ctx.get_weight("%s.conv1d.2.weight", prefix);
-        post_ln_w  = ctx.get_weight("%s.post_ln.bias",    prefix);
-        post_ln_b  = ctx.get_weight("%s.post_ln.weight",  prefix);
+        post_ln_b  = ctx.get_weight("%s.post_ln.bias",    prefix);
+        post_ln_w  = ctx.get_weight("%s.post_ln.weight",  prefix);
 
         mm_norm_pre_w = ctx.get_weight("mm.%s.norm_pre.weight", prefix);
         mm_norm_mid_w = ctx.get_weight("mm.%s.norm_mid.weight", prefix);
@@ -90,7 +90,7 @@ struct ultravox_encoder {
 int main() {
     ggml_easy::ctx_params params;
     ggml_easy::ctx ctx(params);
-    ctx.load_gguf("ultravox.gguf");
+    ctx.load_gguf("ultravox-f32.gguf");
 
     const int n_step  = 1024;
     const int n_mel   = 128;
@@ -120,12 +120,18 @@ int main() {
             ggml_tensor * cur = ggml_conv_1d_ph(ctx0, model.conv1d_1_w, inp_raw, 1, 1);
             cur = ggml_add(ctx0, cur, model.conv1d_1_b);
 
+            //cur = ggml_cast(ctx0, cur, GGML_TYPE_F16);
             cur = ggml_gelu(ctx0, cur);
+            //cur = ggml_cast(ctx0, cur, GGML_TYPE_F32);
+            utils.debug_print(cur, "first conv");
 
             cur = ggml_conv_1d_ph(ctx0, model.conv1d_2_w, cur, 2, 1);
             cur = ggml_add(ctx0, cur, model.conv1d_2_b);
+            utils.debug_print(cur, "second conv");
 
+            //cur = ggml_cast(ctx0, cur, GGML_TYPE_F16);
             cur = ggml_gelu(ctx0, cur);
+            //cur = ggml_cast(ctx0, cur, GGML_TYPE_F32);
             // transpose
             inp = ggml_cont(ctx0, ggml_transpose(ctx0, cur));
         }
@@ -159,6 +165,7 @@ int main() {
                 k = ggml_cont(ctx0, ggml_permute(ctx0, k, 0, 2, 1, 3));
 
                 ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
+                //ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
                 kq = ggml_soft_max_ext(ctx0, kq, nullptr, 1.0f / std::sqrt(d_head), 0.0f);
 
                 v = ggml_cont(ctx0, ggml_permute(ctx0, v, 1, 2, 0, 3));
@@ -194,19 +201,24 @@ int main() {
 
             inp = cur;
 
-            utils.debug_print(cur, "layer %d out", il);
-            utils.debug_print(ggml_sum(ctx0, cur), "layer %d out", il);
+            utils.debug_print(inp, "layer %d out", il);
+            utils.debug_print(ggml_sum(ctx0, inp), "layer %d out", il);
         }
 
         ggml_tensor * embeddings = inp;
+
+        //embeddings = utils.new_input("test", GGML_TYPE_F32, 1280, 512);
+        //embeddings = ggml_scale(ctx0, embeddings, 0.0);
 
         // output norm
         embeddings = ggml_norm(ctx0, embeddings, eps);
         embeddings = ggml_add(ctx0, ggml_mul(ctx0, embeddings, model.post_ln_w), model.post_ln_b);
 
-        embeddings = utils.new_input("test", GGML_TYPE_F32, 1280, 512);
-
         utils.debug_print(embeddings, "after output norm");
+        utils.debug_print(ggml_sum(ctx0, embeddings), "after output norm sum");
+
+        utils.debug_print(ggml_scale(ctx0, model.post_ln_w, 1.0), "post_ln_w");
+        utils.debug_print(ggml_scale(ctx0, model.post_ln_b, 1.0), "post_ln_b");
 
         // StackAudioFrames
         // https://huggingface.co/fixie-ai/ultravox-v0_5-llama-3_2-1b/blob/main/ultravox_model.py
@@ -223,6 +235,7 @@ int main() {
         }
 
         utils.debug_print(embeddings, "after stack");
+        utils.debug_print(ggml_sum(ctx0, embeddings), "after stack sum");
 
         // UltravoxProjector
         {
@@ -233,6 +246,8 @@ int main() {
 
             // ffn in
             cur = ggml_mul_mat(ctx0, model.mm_1_w, cur);
+
+            utils.debug_print(cur, "before swiglu");
 
             // swiglu
             {
@@ -245,7 +260,7 @@ int main() {
                 cur = ggml_mul(ctx0, x0, x1);
             }
 
-            utils.debug_print(embeddings, "after swiglu");
+            utils.debug_print(cur, "after swiglu");
 
             // mid-norm
             cur = ggml_rms_norm(ctx0, cur, 1e-6);
@@ -258,13 +273,15 @@ int main() {
         }
 
         utils.debug_print(embeddings, "output");
+        utils.debug_print(ggml_sum(ctx0, embeddings), "output_sum");
     });
 
     // set the input
     {
         std::vector<float> inp_raw(n_mel*n_step, 0.1f);
         for (int i = 0; i < n_step*n_mel; i++) {
-            inp_raw[i] = (float)std::sin((float)i)*0.1f;
+            //inp_raw[i] = (float)std::sin((float)i)*0.1f;
+            inp_raw[i] = 1.0f / (float)(i+1);
         }
         ctx.set_tensor_data("inp_raw", inp_raw.data());
 
@@ -272,9 +289,9 @@ int main() {
         for (int i = 0; i < n_pos; i++) positions[i] = i;
         ctx.set_tensor_data("positions", positions.data());
 
-        std::vector<float> test(1280*512, 0.1f);
-        for (int i = 0; i < (int)test.size(); i++) test[i] = (float)std::sin((float)i)*0.1f;
-        ctx.set_tensor_data("test", test.data());
+        //std::vector<float> test(1280*512, 0.1f);
+        //for (int i = 0; i < (int)test.size(); i++) test[i] = (float)std::sin((float)i)*0.1f;
+        //ctx.set_tensor_data("test", test.data());
     }
 
     // compute
