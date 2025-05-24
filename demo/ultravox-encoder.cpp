@@ -4,6 +4,11 @@
 #include <thread>
 #include <cmath>
 
+// placeholder, to be removed when it's upstreamed
+ggml_tensor * ggml_gelu_erf(ggml_context * ctx, ggml_tensor * a) {
+    return a;
+}
+
 struct ultravox_encoder {
     float norm_eps = 1e-5;
     int n_head = 20;
@@ -87,8 +92,24 @@ struct ultravox_encoder {
     }
 };
 
+// unused, but just keep it here for fun
+static ggml_tensor * custom_gelu(ggml_context * ctx, ggml_tensor * a) {
+    ggml_tensor * one = ggml_arange(ctx, 1.0f, 2.0f, 1.0f);
+    one = ggml_view_1d(ctx, one, 1, 0);
+    ggml_tensor * a3 = ggml_mul(ctx, a, ggml_mul(ctx, a, a));
+    ggml_tensor * a3_s = ggml_scale(ctx, a3, 0.035677f);
+    ggml_tensor * inner = ggml_add(ctx, a3_s, ggml_scale(ctx, a, 0.797885f));
+    inner = ggml_scale(ctx, inner, 0.7978845608f);
+    ggml_tensor * out = ggml_tanh(ctx, inner);
+    out = ggml_add(ctx, out, one);
+    out = ggml_mul(ctx, out, a);
+    out = ggml_scale(ctx, out, 0.5f);
+    return out;
+}
+
 int main() {
     ggml_easy::ctx_params params;
+    params.use_gpu = false;
     ggml_easy::ctx ctx(params);
     ctx.load_gguf("ultravox-f32.gguf");
 
@@ -117,26 +138,31 @@ int main() {
         // conv1d block
         {
             // convolution + gelu
-            ggml_tensor * cur = ggml_conv_1d_ph(ctx0, model.conv1d_1_w, inp_raw, 1, 1);
+            ggml_tensor * cur = ggml_conv_1d(ctx0, model.conv1d_1_w, inp_raw, 1, 1, 1);
             cur = ggml_add(ctx0, cur, model.conv1d_1_b);
 
             //cur = ggml_cast(ctx0, cur, GGML_TYPE_F16);
-            cur = ggml_gelu(ctx0, cur);
+            cur = ggml_gelu_erf(ctx0, cur);
             //cur = ggml_cast(ctx0, cur, GGML_TYPE_F32);
             utils.debug_print(cur, "first conv");
+            utils.debug_print(ggml_sum(ctx0, cur), "first conv sum");
 
-            cur = ggml_conv_1d_ph(ctx0, model.conv1d_2_w, cur, 2, 1);
+            cur = ggml_conv_1d(ctx0, model.conv1d_2_w, cur, 2, 1, 1);
             cur = ggml_add(ctx0, cur, model.conv1d_2_b);
             utils.debug_print(cur, "second conv");
+            utils.debug_print(ggml_sum(ctx0, cur), "second conv sum");
 
-            //cur = ggml_cast(ctx0, cur, GGML_TYPE_F16);
-            cur = ggml_gelu(ctx0, cur);
+            //cur = ggml_cast(ctx0, cur, GGML_TYPE_F32);
+            cur = ggml_gelu_erf(ctx0, cur);
             //cur = ggml_cast(ctx0, cur, GGML_TYPE_F32);
             // transpose
             inp = ggml_cont(ctx0, ggml_transpose(ctx0, cur));
         }
 
+        //inp = ggml_scale(ctx0, inp, 0.0); // test
+
         utils.debug_print(inp, "after conv1d");
+        utils.debug_print(ggml_sum(ctx0, inp), "after conv1d sum");
 
         // add position embeddings
         inp = ggml_add(ctx0, inp, ggml_get_rows(ctx0, model.position_embeddings, positions));
@@ -165,7 +191,7 @@ int main() {
                 k = ggml_cont(ctx0, ggml_permute(ctx0, k, 0, 2, 1, 3));
 
                 ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
-                //ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+                ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
                 kq = ggml_soft_max_ext(ctx0, kq, nullptr, 1.0f / std::sqrt(d_head), 0.0f);
 
                 v = ggml_cont(ctx0, ggml_permute(ctx0, v, 1, 2, 0, 3));
@@ -179,6 +205,7 @@ int main() {
             }
 
             utils.debug_print(cur, "layer %d after attn", il);
+            utils.debug_print(ggml_sum(ctx0, cur), "layer %d after attn sum", il);
 
             // residual
             cur = ggml_add(ctx0, cur, inp);
@@ -190,11 +217,13 @@ int main() {
             // mlp
             {
                 cur = ggml_add(ctx0, ggml_mul_mat(ctx0, layer.ff_up_w, cur), layer.ff_up_b);
-                cur = ggml_gelu(ctx0, cur);
+                cur = ggml_gelu_erf(ctx0, cur);
+                //cur = custom_gelu(ctx0, cur);
                 cur = ggml_add(ctx0, ggml_mul_mat(ctx0, layer.ff_down_w, cur), layer.ff_down_b);
             }
 
             utils.debug_print(cur, "layer %d after ffn", il);
+            utils.debug_print(ggml_sum(ctx0, cur), "layer %d after ffn sum", il);
 
             // residual
             cur = ggml_add(ctx0, cur, inp);
@@ -278,10 +307,10 @@ int main() {
 
     // set the input
     {
-        std::vector<float> inp_raw(n_mel*n_step, 0.1f);
+        std::vector<float> inp_raw(n_mel*n_step, 0.0f);
         for (int i = 0; i < n_step*n_mel; i++) {
-            //inp_raw[i] = (float)std::sin((float)i)*0.1f;
-            inp_raw[i] = 1.0f / (float)(i+1);
+            inp_raw[i] = (float)std::sin((float)i)*0.1f;
+            //inp_raw[i] = 1.0f / (float)(i+1);
         }
         ctx.set_tensor_data("inp_raw", inp_raw.data());
 
