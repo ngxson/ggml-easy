@@ -16,6 +16,7 @@ set(DEMO_TARGETS
     ultravox-encoder
     whisper-encoder
     2d-rope
+    fastvlm
     random)
 
 foreach(TARGET ${DEMO_TARGETS})
