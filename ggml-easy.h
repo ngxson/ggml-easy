@@ -136,7 +136,7 @@ public:
         backend_buft.push_back(ggml_backend_get_default_buffer_type(backend_cpu));
     
         sched.reset(
-            ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, false)
+            ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, false, true)
         );
 
         buf_compute_meta.resize(max_nodes * ggml_tensor_overhead() + ggml_graph_overhead());
