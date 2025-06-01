@@ -760,3 +760,14 @@ void string_replace_all(std::string & s, const std::string & search, const std::
 }
 
 } // namespace ggml_easy
+
+//
+// extension to ggml functions
+//
+
+// create tensor with all elements set to 1.0
+ggml_tensor * ggml_ones(ggml_context * ctx, int64_t ne0, int64_t ne1 = 1, int64_t ne2 = 1, int64_t ne3 = 1) {
+    ggml_tensor * x = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+    x = ggml_cos(ctx, ggml_scale(ctx, x, 0.0f)); // cos(0) = 1
+    return ggml_repeat_4d(ctx, x, ne0, ne1, ne2, ne3);
+}
