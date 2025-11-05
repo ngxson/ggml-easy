@@ -17,6 +17,7 @@ set(DEMO_TARGETS
     whisper-encoder
     2d-rope
     fastvlm
+    mobilenetv5
     random)
 
 foreach(TARGET ${DEMO_TARGETS})
